@@ -91,6 +91,16 @@ An adapter whose harness cannot support cross-process resume must still return a
 ref from `serialize()` (tier B) — it never throws for lack of durability. The tier,
 not the call site, tells the workflow what it can rely on.
 
+## Packaging & runtime
+
+- **Single package.** Per-harness subpath exports (`yoke/opencode`, …); each
+  harness SDK is an optional peerDependency, so users install only the adapters
+  they use. `open()` on a harness whose SDK is missing fails loudly, naming the
+  package to install.
+- Adapters live in `src/adapters/<harness>/` behind an internal registry seam so
+  a later split into workspace packages stays mechanical.
+- **Runtime: Bun** — built-in `bun:test`, keeping dev dependencies at zero.
+
 ## Failure contract
 
 `prompt()` has exactly two outcomes: it resolves with the complete final message,
@@ -167,7 +177,10 @@ the V1 docs at `opencode.ai/docs` for V2 questions.
 
 ## Open questions
 
-1. Repo/package layout: single package or adapters as workspace packages?
-2. Runtime target: Node vs Bun (Pi examples use Bun; Codex SDK needs Node ≥ 18). Do not pick silently.
-3. Does `prompt()` need multi-part/image input in v1, or string-only? Design assumed string-only.
-4. Concurrency/rate-limit policy assumed to be the workflow's job, not yoke's.
+1. Does `prompt()` need multi-part/image input in v1, or string-only? Design assumed string-only.
+2. Concurrency/rate-limit policy assumed to be the workflow's job, not yoke's.
+
+Resolved:
+
+- Repo/package layout → single package with subpath exports + optional peers (see "Packaging & runtime").
+- Runtime target → Bun.

@@ -1,0 +1,34 @@
+{
+  "name": "yoke",
+  "version": "0.0.0",
+  "description": "One interface for driving coding-agent harnesses from your own code.",
+  "type": "module",
+  "license": "UNLICENSED",
+  "private": true,
+  "engines": {
+    "bun": ">=1.1"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./opencode": "./src/adapters/opencode/index.ts"
+  },
+  "peerDependencies": {
+    "@opencode-ai/client": "*",
+    "@anthropic-ai/claude-agent-sdk": "*",
+    "@cursor/sdk": "*"
+  },
+  "peerDependenciesMeta": {
+    "@opencode-ai/client": {
+      "optional": true
+    },
+    "@anthropic-ai/claude-agent-sdk": {
+      "optional": true
+    },
+    "@cursor/sdk": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.0"
+  }
+}
