@@ -14,9 +14,9 @@
     "./conformance": "./src/conformance/index.ts"
   },
   "peerDependencies": {
-    "@opencode-ai/client": "*",
     "@anthropic-ai/claude-agent-sdk": "*",
-    "@cursor/sdk": "*"
+    "@cursor/sdk": "*",
+    "@opencode-ai/client": "*"
   },
   "peerDependenciesMeta": {
     "@opencode-ai/client": {
@@ -30,12 +30,14 @@
     }
   },
   "devDependencies": {
-    "@types/bun": "^1.4.0",
-    "@opencode-ai/client": "0.0.0-beta-17963"
+    "@anthropic-ai/claude-agent-sdk": "0.3.241",
+    "@opencode-ai/client": "0.0.0-beta-17963",
+    "@types/bun": "^1.4.0"
   },
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "conformance:opencode": "bun scripts/run-opencode-conformance.ts"
+    "conformance:opencode": "bun scripts/run-opencode-conformance.ts",
+    "conformance:claude-code": "bun scripts/run-claude-code-conformance.ts"
   }
 }

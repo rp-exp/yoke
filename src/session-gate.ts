@@ -41,8 +41,16 @@ export class SessionGate implements SessionHandle {
   async prompt(input: string): Promise<TurnResult> {
     this.assertPromptable()
     this.abortRequested = false
+    // inFlight must be the *mapped* promise (abort classification included),
+    // so dispose()/abort()-adjacent consumers observe the contract's rejection
+    // type, not the backend's raw error.
     const turn = this.backend.startTurn(input)
-    this.inFlight = turn
+    const tracked = this.runTurn(turn)
+    this.inFlight = tracked
+    return tracked
+  }
+
+  private async runTurn(turn: Promise<TurnResult>): Promise<TurnResult> {
     try {
       return await turn
     } catch (err) {

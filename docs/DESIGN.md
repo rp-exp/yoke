@@ -162,7 +162,7 @@ YAGNI check before writing any adapter: confirm the workflow that needs it exist
 | Harness | Package | Architecture | Gotchas |
 |---|---|---|---|
 | OpenCode (V2) | `@opencode-ai/client` | HTTP client → shared background service (`opencode2`) | Service lifecycle: `opencode2 service status/restart`; OpenAPI at server `/openapi.json`; sessions survive the orchestrator process |
-| Claude Code | `@anthropic-ai/claude-agent-sdk` | Spawns CLI subprocess, stdio events | `query()` API; resume via `resume: sessionId`; this is what Claude Code dynamic workflows are built on |
+| Claude Code | `@anthropic-ai/claude-agent-sdk` | Spawns CLI subprocess per turn (`query()`), one `result` message per turn | Session ids pre-assigned via `options.sessionId` so refs serialize before the first turn; a ref only becomes resumable once a turn persists its JSONL — unresumable refs fail loudly at prompt time. Headless sessions auto-deny permission prompts; slow turns must be tool-free |
 | Cursor | `@cursor/sdk` | `Agent.create({ local \| cloud })` → `run.stream()` | Cloud runs on dedicated VMs, resumable via `Agent.getRun(run.id)` |
 | Codex *(deferred)* | `@openai/codex-sdk` | Wraps CLI, JSONL over stdin/stdout | Node ≥ 18; `startThread()` / `run()` / `runStreamed()`; threads persist in `~/.codex/sessions`, `resumeThread(id)`; requires git repo unless `skipGitRepoCheck: true` |
 | Pi *(deferred)* | `@earendil-works/pi-coding-agent` | In-process library, no subprocess | `createAgentSession()`, `session.prompt()`, `session.steer()`; `SessionManager.inMemory()/create(cwd)/continueRecent/open(path)`; sessions are tree-structured JSONL; forking via `AgentSessionRuntime` |
