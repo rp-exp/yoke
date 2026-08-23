@@ -1,4 +1,5 @@
 import type { SessionHandle } from "../src/types.ts"
+import { YokeError } from "../src/errors.ts"
 
 /**
  * Example: PR review rounds driven through three harnesses at once
@@ -209,13 +210,17 @@ async function askValidated<T>(
   timeoutMs: number,
 ): Promise<T> {
   let lastError: unknown
-  // One retry: models occasionally wrap or malform JSON; two attempts keep
-  // flakiness cheap without masking a harness that cannot follow instructions.
+  // One retry — but only for reply-shape problems. A harness-level failure
+  // (YokeError: turn failed, aborted, ...) will not improve by asking the
+  // model for "corrected JSON"; rethrow it immediately with everything the
+  // error carries, so provider causes stay visible instead of being
+  // mislabelled as the model failing to follow the format.
   for (let attempt = 1; attempt <= 2; attempt++) {
     let timer: ReturnType<typeof setTimeout> | undefined
+    const promptForAttempt = attempt === 1 ? prompt : `${prompt}\n\nYour previous reply was refused (${String(lastError)}). Reply again with ONLY corrected JSON.`
     try {
       const reply = await Promise.race([
-        agent.prompt(attempt === 1 ? prompt : `${prompt}\n\nYour previous reply was refused (${String(lastError)}). Reply again with ONLY corrected JSON.`),
+        agent.prompt(promptForAttempt),
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => reject(new Error(`turn timed out after ${timeoutMs}ms`)), timeoutMs)
         }),
@@ -225,6 +230,7 @@ async function askValidated<T>(
       lastError = err
       await agent.abort().catch(() => {}) // best effort on timeout races; gate classifies
       if (/timed out/.test(String(err))) throw err
+      if (err instanceof YokeError) throw err
     } finally {
       clearTimeout(timer)
     }

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { YokeError } from "../src/errors.ts"
 import type { AgentFactory, RoundAgent } from "../examples/tri-review-rounds.ts"
 import {
   assignAxes,
@@ -289,6 +290,33 @@ describe("tri-review orchestration", () => {
       timeoutMs: 5_000,
     })
     expect(result.status).toBe("accounting-failed")
+  })
+
+  test("harness-level failure fails fast — no JSON-correction retry", async () => {
+    let prompts = 0
+    const broken: AgentFactory = {
+      id: "broken",
+      fresh: async () => ({
+        prompt() {
+          prompts += 1
+          return Promise.reject(new YokeError("opencode", "turn failed", { raw: { finish: "error" } }))
+        },
+        abort: async () => {},
+        dispose: async () => {},
+      }),
+    }
+    const run = runTriReview({
+      reviewers: [broken, ...fakeReviewers([[CLAIMS([]), CLAIMS([])]])],
+      verifier: fakeVerifier([FINDINGS([])]),
+      base: BASE,
+      head: HEAD,
+      maxRounds: 1,
+      timeoutMs: 5_000,
+    })
+    // The YokeError propagates as-is, not wrapped in "failed to submit valid JSON".
+    expect(run).rejects.toThrow(YokeError)
+    await run.catch((err: Error) => expect(err.message).toMatch(/turn failed/))
+    expect(prompts).toBe(1)
   })
 
   test("hung reviewer turn times out and aborts the whole run loudly", async () => {
