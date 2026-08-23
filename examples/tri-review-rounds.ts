@@ -340,10 +340,10 @@ async function main(): Promise<void> {
     },
     {
       id: "reviewing-cursor",
-      // Grok-4.6 on Cursor: exact id and any effort knob are unverifiable
-      // without CURSOR_API_KEY (the SDK's own error lists valid ids on a bad
-      // guess). Runs at the model's default effort until then.
-      fresh: async () => handleToRoundAgent(await (await open("cursor")).createSession({ cwd, model: "grok-4.6" })),
+      fresh: async () =>
+        handleToRoundAgent(
+          await (await open("cursor")).createSession({ cwd, model: "grok-4.6", effort: "high" }),
+        ),
     },
     {
       id: "reviewing-claude-code",
