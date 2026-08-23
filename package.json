@@ -11,6 +11,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./opencode": "./src/adapters/opencode/index.ts",
+    "./claude-code": "./src/adapters/claude-code/index.ts",
+    "./cursor": "./src/adapters/cursor/index.ts",
     "./conformance": "./src/conformance/index.ts"
   },
   "peerDependencies": {
