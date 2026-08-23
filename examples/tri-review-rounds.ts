@@ -4,12 +4,11 @@ import type { SessionHandle } from "../src/types.ts"
  * Example: PR review rounds driven through three harnesses at once
  * (`yoke/opencode`, `yoke/claude-code`, `yoke/cursor`) plus a verifier turn.
  *
- * Every reviewer runs the user's battle-tested /code-review procedure (ported
- * from the opencode command into a self-contained prompt, so harnesses without
- * the skill execute it identically): pin the fixed point, find the PR's spec,
- * then report along two separated axes — Standards (repo docs + smell
- * baseline) and Spec. The verifier merges claims per axis; the final report
- * keeps the axes apart, exactly like the skill's aggregate step.
+ * Every reviewer executes the user's battle-tested /code-review procedure by
+ * following their locally installed code-review skill — the prompt delegates
+ * to the skill (like the opencode command does) instead of copying it, so the
+ * skill keeps evolving outside this file. The verifier merges claims per
+ * axis; the final report keeps the axes apart, like the skill's aggregate.
  *
  * Ported from the Claude Code `pr-review-rounds` workflow to show the yoke
  * shape of the same idea: your script is the orchestrator. Reviewers are
@@ -252,25 +251,11 @@ function accountingErrors(
   return errors
 }
 
-// The reviewer prompt is a self-contained port of the user's battle-tested
-// /code-review opencode command (the code-review skill): each review agent
-// runs the same two-axis procedure regardless of whether its harness has the
-// skill installed.
-
-const SMELL_BASELINE = [
-  "Mysterious Name — a name that doesn't reveal what it does or holds → rename; no honest name means murky design",
-  "Duplicated Code — the same logic shape in more than one hunk or file → extract the shared shape, call it from both",
-  "Feature Envy — a method reaching into another object's data more than its own → move it onto the data it envies",
-  "Data Clumps — the same few fields or params keep travelling together → bundle them into one type",
-  "Primitive Obsession — a primitive standing in for a domain concept → give the concept its own small type",
-  "Repeated Switches — the same switch/if-cascade on the same type recurs → polymorphism, or one shared map",
-  "Shotgun Surgery — one logical change forces scattered edits across many files → gather what changes into one module",
-  "Divergent Change — one module edited for several unrelated reasons → split so each changes for one reason",
-  "Speculative Generality — abstraction or hooks for needs the spec doesn't have → delete; inline until a real need shows",
-  "Message Chains — long a.b().c().d() navigation → hide the walk behind one method on the first object",
-  "Middle Man — a class or function that mostly delegates onward → cut it, call the target direct",
-  "Refused Bequest — an implementer ignoring most of what it inherits → drop the inheritance, use composition",
-].map((line) => `   - ${line}`).join("\n")
+// The reviewer prompt mirrors the user's battle-tested /code-review opencode
+// command: it delegates the procedure to each agent's locally installed
+// code-review skill instead of copying the skill into the prompt — the skill
+// evolves outside this file. Only the orchestration contract (read-only,
+// fixed point, JSON claim schema with axes) is added here.
 
 /**
  * Findings inherit their axis from the claims they source — never from the
@@ -298,23 +283,10 @@ export function assignAxes(
 }
 
 export const reviewPrompt = (base: string, head: string): string =>
-  `You are an independent reviewer executing this code-review procedure exactly. You are strictly read-only: never edit, create, stage, commit, or delete anything.
-The change under review — fixed point already validated:
-- diff: git diff ${base}...${head}
-- commits: git log ${base}..${head} --oneline
-
-Procedure:
-1. Run both commands and confirm the diff is non-empty. An empty diff means an empty claims array.
-2. Identify the spec, in this order: (a) issue references in the commit messages ("#123", "Closes #45") — open them if your tools allow; (b) a spec file under docs/, specs/, or .scratch/ matching the branch or feature. If nothing is found, skip the Spec axis entirely.
-3. Identify standards sources: anything in the repo documenting how code should be written (CODING_STANDARDS.md, CONTRIBUTING.md, AGENTS.md, ...). Documented repo standards override the smell baseline below, and anything tooling already enforces is skipped.
-4. Review along two separate axes:
-   - Standards: every place the diff violates a documented standard — cite the file and the rule, and mark such claims "hardViolation":true (the only case where that flag may be set); plus any baseline smell you spot — name it and quote the hunk. Baseline smells are always judgement calls, never hard violations.
-   - Spec: requirements the spec asked for but are missing or partial; behaviour nobody asked for (scope creep); implementations that look wrong. Quote the spec line for each Spec claim.
-5. Submit evidence as claims: what is wrong, where, why, which axis. Do not classify disposition and do not propose fixes. An empty claims array states you found nothing.
-
-Smell baseline (what it is → how to fix):
-${SMELL_BASELINE}
-
+  `Review the change at ${head} since fixed point ${base} by following the \`code-review\` skill (load it via the skill tool if you haven't).
+- Diff: git diff ${base}...${head}. Commits: git log ${base}..${head} --oneline. Both are pre-validated; an empty diff means an empty claims array.
+- You are strictly read-only: never edit, create, stage, commit, or delete anything.
+- Report every finding as a claim tagged with the code-review axis it belongs to: "standards" or "spec". Set "hardViolation":true only where the skill treats something as a documented-standard breach, not for judgement-call smells.
 Reply with ONLY a JSON object, no prose:
 {"claims":[{"id":"slug","title":"...","locations":[{"path":"src/x.ts","line":10}],"explanation":"why this is wrong","suggestedSeverity":"critical|high|medium|low","axis":"standards|spec","hardViolation":true}]}`
 
