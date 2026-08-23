@@ -187,7 +187,7 @@ export interface TriReviewDeps {
   readonly timeoutMs: number
   /** Called after each round for live progress reporting. */
   onRound?: (summary: RoundSummary) => void
-  /** Called when a transient harness failure triggers a fresh-session retry. */
+  /** Called when a transient harness failure triggers a fresh-session retry. Defaults to console.error. */
   onRetry?: (message: string) => void
   /** Backoff between transient retries, ms, by attempt number. Defaults to retryBackoffMs. */
   backoffMs?: (attempt: number) => number
@@ -205,6 +205,18 @@ export interface TriReviewResult {
   /** Latest state of every finding ever raised, by stable id. */
   readonly findings: readonly Finding[]
   readonly outstandingFixNow: readonly string[]
+}
+
+/**
+ * A turn that outlived its timeout was aborted mid-flight. Classified as
+ * transient (see isTransientTurnFailure): overload-shaped, and the abort
+ * makes a fresh-session repeat safe for read-only turns.
+ */
+export class TurnTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`turn timed out after ${timeoutMs}ms`)
+    this.name = "TurnTimeoutError"
+  }
 }
 
 async function askValidated<T>(
@@ -226,14 +238,14 @@ async function askValidated<T>(
       const reply = await Promise.race([
         agent.prompt(promptForAttempt),
         new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error(`turn timed out after ${timeoutMs}ms`)), timeoutMs)
+          timer = setTimeout(() => reject(new TurnTimeoutError(timeoutMs)), timeoutMs)
         }),
       ])
       return validate(parseJsonReply(reply))
     } catch (err) {
       lastError = err
       await agent.abort().catch(() => {}) // best effort on timeout races; gate classifies
-      if (/timed out/.test(String(err))) throw err
+      if (err instanceof TurnTimeoutError) throw err
       if (err instanceof YokeError) throw err
     } finally {
       clearTimeout(timer)
@@ -322,7 +334,8 @@ Reply with ONLY:
  *
  * - transient (up to 5 attempts total on FRESH sessions, exponential
  *   backoff): provider streams dying mid-turn ("invalid-output",
- *   overloaded models), network hiccups.
+ *   overloaded models), network hiccups, and turns that outlived their
+ *   timeout and were aborted mid-flight (TurnTimeoutError).
  *   Reviewer turns here are read-only, so repeating them is safe — that
  *   idempotency judgment is why the policy lives in this workflow, not yoke.
  * - permanent (fail immediately): policy blocks, auth, bad requests —
@@ -337,12 +350,13 @@ const TRANSIENT_PATTERNS = [
 ]
 
 export function isTransientTurnFailure(err: unknown): boolean {
+  if (err instanceof TurnTimeoutError) return true
   if (!(err instanceof YokeError)) return false
   const haystack = `${err.message} ${JSON.stringify(err.raw ?? {})}`
   return TRANSIENT_PATTERNS.some((pattern) => pattern.test(haystack))
 }
 
-/** Backoff before retry attempt n (1-based): 2s, 8s, 30s, 2min — capped. */
+/** Backoff before retry attempt n (1-based): 2s, 8s, 32s, 2min — capped. */
 export function retryBackoffMs(attempt: number): number {
   return Math.min(2 * 4 ** (attempt - 1), 120) * 1000
 }
@@ -402,7 +416,7 @@ export async function runTriReview(deps: TriReviewDeps): Promise<TriReviewResult
           () => reviewPrompt(deps.base, deps.head),
           validateClaims,
           deps.timeoutMs,
-          deps.onRetry ?? (() => {}),
+          deps.onRetry ?? console.error,
           deps.backoffMs ?? retryBackoffMs,
         )
         return { reportID: factory.id, claims }
@@ -416,7 +430,7 @@ export async function runTriReview(deps: TriReviewDeps): Promise<TriReviewResult
       () => verifierPrompt(round, reports, priorFindings),
       validateFindings,
       deps.timeoutMs,
-      deps.onRetry ?? (() => {}),
+      deps.onRetry ?? console.error,
       deps.backoffMs ?? retryBackoffMs,
     )
 

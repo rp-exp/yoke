@@ -9,6 +9,7 @@ import {
   renderReport,
   retryBackoffMs,
   runTriReview,
+  TurnTimeoutError,
   validateClaims,
   validateFindings,
 } from "../examples/tri-review-rounds.ts"
@@ -428,6 +429,8 @@ describe("tri-review orchestration", () => {
 
   test("isTransientTurnFailure classifies real provider errors", () => {
     expect(isTransientTurnFailure(transientFailure())).toBe(true)
+    // A turn that outlived its timeout was aborted mid-flight — overload-shaped.
+    expect(isTransientTurnFailure(new TurnTimeoutError(50))).toBe(true)
     expect(
       isTransientTurnFailure(
         new YokeError("opencode", "turn failed", {
@@ -438,10 +441,55 @@ describe("tri-review orchestration", () => {
     expect(isTransientTurnFailure(new Error("plain"))).toBe(false)
   })
 
-  test("hung reviewer turn times out and aborts the whole run loudly", async () => {
+  test("retries log loudly even when the caller supplies no onRetry", async () => {
+    const logged: string[] = []
+    const original = console.error
+    console.error = (message: string) => {
+      logged.push(message)
+    }
+    try {
+      let sessionCount = 0
+      const flaky: AgentFactory = {
+        id: "flaky-provider",
+        fresh: async () => {
+          sessionCount += 1
+          const broken = sessionCount === 1
+          return {
+            prompt() {
+              if (broken) throw transientFailure()
+              return Promise.resolve(CLAIMS(["ok"]))
+            },
+            abort: async () => {},
+            dispose: async () => {},
+          }
+        },
+      }
+      const result = await runTriReview({
+        reviewers: [flaky, ...fakeReviewers([[CLAIMS([]), CLAIMS([])]])],
+        verifier: fakeVerifier([FINDINGS([{ id: "F1", sources: ["flaky-provider:ok"], disposition: "skip" }])]),
+        base: BASE,
+        head: HEAD,
+        maxRounds: 1,
+        timeoutMs: 5_000,
+        backoffMs: () => 0,
+      })
+      expect(result.status).toBe("clean")
+    } finally {
+      console.error = original
+    }
+    expect(logged).toHaveLength(1)
+    expect(logged[0]).toMatch(/attempt 2\/5/)
+    expect(logged[0]).toMatch(/transient harness failure/)
+  })
+
+  test("hung reviewer turn is transient: retries on fresh sessions, then fails loud", async () => {
+    let sessionCount = 0
     const hung: AgentFactory = {
       id: "hung",
-      fresh: async () => scriptedAgent([], { hang: true }),
+      fresh: async () => {
+        sessionCount += 1
+        return scriptedAgent([], { hang: true })
+      },
     }
     const result = runTriReview({
       reviewers: [hung, ...fakeReviewers([[CLAIMS([]), CLAIMS([])]])],
@@ -450,7 +498,10 @@ describe("tri-review orchestration", () => {
       head: HEAD,
       maxRounds: 1,
       timeoutMs: 50,
+      backoffMs: () => 0, // no real sleeping in tests; schedule tested separately
     })
     expect(result).rejects.toThrow(/timed out/)
+    await result.catch(() => {})
+    expect(sessionCount).toBe(5) // MAX_ATTEMPTS, then loud failure
   })
 })
