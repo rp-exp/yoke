@@ -80,9 +80,21 @@ export function createOpenCodeHarness(client: OpenCodeLike): Harness {
             : new YokeError("opencode", `no live session for ref ${JSON.stringify(opts.sessionRef)}`, { cause })
         }
       } else {
+        if (opts.effort !== undefined && opts.model === undefined) {
+          // A variant only exists relative to a model ref; there is nowhere to
+          // put it when the session uses the harness default.
+          throw new YokeError("opencode", "SessionOptions.effort requires an explicit SessionOptions.model")
+        }
         const info = await client.session.create({
           location: { directory: opts.cwd },
-          ...(opts.model !== undefined ? { model: parseModelRef(opts.model) } : {}),
+          ...(opts.model !== undefined
+            ? {
+                model: {
+                  ...parseModelRef(opts.model),
+                  ...(opts.effort !== undefined ? { variant: opts.effort } : {}),
+                },
+              }
+            : {}),
         })
         sessionID = assertSessionID(info.id)
       }

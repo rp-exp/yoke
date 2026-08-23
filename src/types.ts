@@ -19,6 +19,13 @@ export interface SessionOptions {
    * Pass-through only — never a registry; omit to use the harness's own default.
    */
   model?: string | undefined
+  /**
+   * Opaque reasoning-effort string (e.g. "high"), same contract as `model`:
+   * verbatim pass-through, mapped to each harness's native knob (claude-code:
+   * native option; opencode: model variant). Harnesses with no equivalent
+   * reject it loudly instead of guessing.
+   */
+  effort?: string | undefined
 }
 
 export interface TurnResult {

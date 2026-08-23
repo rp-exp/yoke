@@ -1,4 +1,4 @@
-import type { SDKResultMessage } from "@anthropic-ai/claude-agent-sdk"
+import type { EffortLevel, SDKResultMessage } from "@anthropic-ai/claude-agent-sdk"
 import { YokeError } from "../../errors.ts"
 import { SessionGate } from "../../session-gate.ts"
 import type { TurnBackend } from "../../session-gate.ts"
@@ -9,6 +9,22 @@ import { assertSessionUUID, decodeRef, encodeRef } from "./ref.ts"
 interface BackendOptions {
   readonly cwd: string
   readonly model?: string | undefined
+  readonly effort?: EffortLevel | undefined
+}
+
+/** The query API accepts only these named levels; anything else is a typo. */
+const EFFORT_LEVELS = new Set(["low", "medium", "high", "xhigh", "max"])
+
+function parseEffort(harnessId: "claude-code", value: string): EffortLevel {
+  if (!EFFORT_LEVELS.has(value)) {
+    throw new YokeError(
+      harnessId,
+      `invalid effort ${JSON.stringify(value)} (expected low|medium|high|xhigh|max)`,
+      { raw: value },
+    )
+  }
+  // Safe: membership in EFFORT_LEVELS is exactly the EffortLevel union.
+  return value as EffortLevel
 }
 
 /**
@@ -41,6 +57,7 @@ export class ClaudeCodeBackend implements TurnBackend {
       options: {
         cwd: this.opts.cwd,
         ...(this.opts.model !== undefined ? { model: this.opts.model } : {}),
+        ...(this.opts.effort !== undefined ? { effort: this.opts.effort } : {}),
         ...(this.turned ? { resume: this.sessionId } : { sessionId: this.sessionId }),
       },
     })
@@ -121,7 +138,16 @@ export function createClaudeCodeHarness(client: ClaudeCodeClientLike): Harness {
         firstTurn = true
       }
       return new SessionGate(
-        new ClaudeCodeBackend(client, { cwd: opts.cwd, model: opts.model }, sessionId, firstTurn),
+        new ClaudeCodeBackend(
+          client,
+          {
+            cwd: opts.cwd,
+            model: opts.model,
+            ...(opts.effort !== undefined ? { effort: parseEffort("claude-code", opts.effort) } : {}),
+          },
+          sessionId,
+          firstTurn,
+        ),
       )
     },
   }

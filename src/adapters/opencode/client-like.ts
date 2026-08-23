@@ -14,6 +14,7 @@ export interface OpenCodeLike {
   readonly session: {
     readonly create: (input: {
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
+      readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string }
     }) => Promise<SessionInfo>
     readonly get: (input: { readonly sessionID: string }) => Promise<SessionInfo>
     readonly prompt: (input: { readonly sessionID: string; readonly text: string }) => Promise<SessionInboxUser>

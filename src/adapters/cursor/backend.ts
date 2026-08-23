@@ -75,6 +75,14 @@ export function createCursorHarness(client: CursorClientLike): Harness {
           'the cursor adapter requires SessionOptions.model (e.g. "composer-2.5"); discover ids via Cursor.models.list()',
         )
       }
+      if (opts.effort !== undefined) {
+        // ModelSelection.params could carry effort, but the parameter vocabulary
+        // is per-model and unverifiable without a live key — refuse rather than guess.
+        throw new YokeError(
+          "cursor",
+          "the cursor adapter does not support SessionOptions.effort yet; set the model's default in Cursor instead",
+        )
+      }
       const options = { model: { id: opts.model }, local: { cwd: opts.cwd } }
       try {
         const agent =

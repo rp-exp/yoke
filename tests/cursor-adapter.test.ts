@@ -127,6 +127,14 @@ describe("cursor harness turns", () => {
     expect(queryCount).toBe(0)
   })
 
+  test("effort is rejected loudly (param vocabulary unverifiable without a live key)", async () => {
+    const { client, queryCount } = fakeClient({})
+    await expect(
+      createCursorHarness(client).createSession({ cwd: CWD, model: "grok-4.6", effort: "high" }),
+    ).rejects.toThrow(/does not support SessionOptions\.effort/)
+    expect(queryCount).toBe(0)
+  })
+
   test("model and cwd pass through into create; send reuses one agent handle", async () => {
     const { client, created, sends } = fakeClient({ results: [{ result: "one" }, { result: "two" }] })
     const harness = createCursorHarness(client)

@@ -141,6 +141,20 @@ describe("claude-code harness turns", () => {
     expect(recorded[0]?.options?.model).toBe("claude-sonnet-4-5")
   })
 
+  test("named effort passes through; invalid effort fails at createSession", async () => {
+    const { client, recorded } = fakeClient({ results: [{ result: "ok" }] })
+    const harness = createClaudeCodeHarness(client)
+    const session = await harness.createSession({ cwd: CWD, model: "opus", effort: "high" })
+    await session.prompt("hello")
+    expect(recorded[0]?.options?.effort).toBe("high")
+    await session.dispose()
+
+    const bad = fakeClient({})
+    await expect(
+      createClaudeCodeHarness(bad.client).createSession({ cwd: CWD, effort: "maximum" }),
+    ).rejects.toThrow(/invalid effort/)
+  })
+
   test("result text becomes TurnResult.text with the raw result preserved", async () => {
     const { client } = fakeClient({ results: [{ result: "final words" }] })
     const harness = createClaudeCodeHarness(client)

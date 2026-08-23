@@ -186,6 +186,35 @@ describe("opencode model passthrough", () => {
     await expect(harness.createSession({ cwd: CWD, model: "/leading" })).rejects.toThrow(YokeError)
     expect(calls).not.toContain("create")
   })
+
+  test("effort rides along as the model variant", async () => {
+    let createdWith: unknown
+    const { client } = fakeClient({})
+    const patched: OpenCodeLike = {
+      ...client,
+      session: {
+        ...client.session,
+        create: async (input) => {
+          createdWith = input
+          return client.session.create(input)
+        },
+      },
+    }
+    const harness = createOpenCodeHarness(patched)
+    const session = await harness.createSession({ cwd: CWD, model: "xai/grok-4.6", effort: "high" })
+    await session.dispose()
+    expect(createdWith).toEqual({
+      location: { directory: CWD },
+      model: { providerID: "xai", id: "grok-4.6", variant: "high" },
+    })
+  })
+
+  test("effort without an explicit model fails loudly", async () => {
+    const { client, calls } = fakeClient({})
+    const harness = createOpenCodeHarness(client)
+    await expect(harness.createSession({ cwd: CWD, effort: "high" })).rejects.toThrow(/requires an explicit/)
+    expect(calls).not.toContain("create")
+  })
 })
 
 describe("opencode harness resume + gate contract", () => {

@@ -333,22 +333,31 @@ async function main(): Promise<void> {
   const factories: AgentFactory[] = [
     {
       id: "reviewing-opencode",
-      fresh: async () => handleToRoundAgent(await (await open("opencode")).createSession({ cwd })),
-    },
-    {
-      id: "reviewing-claude-code",
-      fresh: async () => handleToRoundAgent(await (await open("claude-code")).createSession({ cwd })),
+      fresh: async () =>
+        handleToRoundAgent(
+          await (await open("opencode")).createSession({ cwd, model: "opencode-go/ox-alpha-free", effort: "high" }),
+        ),
     },
     {
       id: "reviewing-cursor",
+      // Grok-4.6 on Cursor: exact id and any effort knob are unverifiable
+      // without CURSOR_API_KEY (the SDK's own error lists valid ids on a bad
+      // guess). Runs at the model's default effort until then.
+      fresh: async () => handleToRoundAgent(await (await open("cursor")).createSession({ cwd, model: "grok-4.6" })),
+    },
+    {
+      id: "reviewing-claude-code",
       fresh: async () =>
-        handleToRoundAgent(await (await open("cursor")).createSession({ cwd, model: "composer-2.5" })),
+        handleToRoundAgent(await (await open("claude-code")).createSession({ cwd, model: "opus", effort: "high" })),
     },
   ]
 
-  // The verifier runs on one harness; any of them works. Pick opencode for symmetry.
-  const verifierFactory = factories[0]
-  if (verifierFactory === undefined) throw new Error("no reviewers configured")
+  // Everything else (the verifier) runs on the opencode harness default —
+  // whatever provider/model/effort the service currently resolves, no pinning.
+  const verifierFactory: AgentFactory = {
+    id: "verifying-opencode",
+    fresh: async () => handleToRoundAgent(await (await open("opencode")).createSession({ cwd })),
+  }
 
   const result = await runTriReview({
     reviewers: factories,
