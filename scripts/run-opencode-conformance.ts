@@ -8,7 +8,11 @@ import "../src/adapters/opencode/index.ts"
  * Requires `opencode2` installed and logged in. Run: bun run conformance:opencode
  */
 
-const MODEL = process.env.YOKE_MODEL ?? "opencode-go/kimi-k3"
+// Cheap and fast beats smart here: conformance needs one-word replies and
+// one-word recall, ~15 calls per run. Override with YOKE_MODEL when debugging.
+// Note: google/* models fail on this setup (antigravity auth rejects plain API
+// calls), so the default is a model verified to work headless.
+const MODEL = process.env.YOKE_MODEL ?? "openai/gpt-5.6-luna"
 
 const subject: TierASubject = {
   harnessId: "opencode",
