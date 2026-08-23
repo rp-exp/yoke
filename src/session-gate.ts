@@ -19,6 +19,13 @@ export interface TurnBackend {
   startTurn(input: string): Promise<TurnResult>
   /** Cancels the in-flight turn started by startTurn. */
   abortTurn(): Promise<void>
+  /**
+   * Releases handle-local resources (runtime processes, connections) when the
+   * session is disposed. Optional: adapters whose sessions need no local
+   * teardown may omit it. Must not touch persisted state — refs stay
+   * resumable after dispose.
+   */
+  disposeBackend?(): Promise<void>
 }
 
 /**
@@ -92,6 +99,7 @@ export class SessionGate implements SessionHandle {
       }
     }
     this.disposed = true
+    await this.backend.disposeBackend?.()
   }
 
   private get id(): HarnessId {

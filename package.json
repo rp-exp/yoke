@@ -31,6 +31,7 @@
   },
   "devDependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.241",
+    "@cursor/sdk": "1.0.28",
     "@opencode-ai/client": "0.0.0-beta-17963",
     "@types/bun": "^1.4.0"
   },
@@ -38,6 +39,7 @@
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "conformance:opencode": "bun scripts/run-opencode-conformance.ts",
-    "conformance:claude-code": "bun scripts/run-claude-code-conformance.ts"
+    "conformance:claude-code": "bun scripts/run-claude-code-conformance.ts",
+    "conformance:cursor": "bun scripts/run-cursor-conformance.ts"
   }
 }
