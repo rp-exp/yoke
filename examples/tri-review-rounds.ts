@@ -4,6 +4,13 @@ import type { SessionHandle } from "../src/types.ts"
  * Example: PR review rounds driven through three harnesses at once
  * (`yoke/opencode`, `yoke/claude-code`, `yoke/cursor`) plus a verifier turn.
  *
+ * Every reviewer runs the user's battle-tested /code-review procedure (ported
+ * from the opencode command into a self-contained prompt, so harnesses without
+ * the skill execute it identically): pin the fixed point, find the PR's spec,
+ * then report along two separated axes — Standards (repo docs + smell
+ * baseline) and Spec. The verifier merges claims per axis; the final report
+ * keeps the axes apart, exactly like the skill's aggregate step.
+ *
  * Ported from the Claude Code `pr-review-rounds` workflow to show the yoke
  * shape of the same idea: your script is the orchestrator. Reviewers are
  * read-only by prompt (enforcement differs per harness — see DESIGN.md);
@@ -35,6 +42,10 @@ export interface Claim {
   readonly locations: readonly Location[]
   readonly explanation: string
   readonly suggestedSeverity: string
+  /** Which code-review axis the claim belongs to ("standards"|"spec"); kept separate end to end. */
+  readonly axis: string
+  /** True only for documented-standard breaches; baseline smells and spec gaps are judgement calls. */
+  readonly hardViolation?: true
 }
 
 export interface Finding {
@@ -44,6 +55,9 @@ export interface Finding {
   readonly explanation: string
   readonly sourceClaimReferences: readonly string[]
   readonly verification: string
+  /** Derived from the sourcing claims, never taken from the verifier. */
+  readonly axis?: string | undefined
+  readonly hardViolation?: boolean | undefined
   readonly rejectionReason?: string | undefined
   readonly decisionReason?: string | undefined
   readonly kind?: string | undefined
@@ -68,12 +82,7 @@ export interface AgentFactory {
 
 const SEVERITIES = new Set(["critical", "high", "medium", "low"])
 const DISPOSITIONS = new Set(["fix-now", "follow-up", "skip"])
-
-const LENSES = [
-  "correctness and edge cases: error handling, concurrency, invariants, off-by-one, resource lifetimes",
-  "spec fidelity and tests: does the change do what it claims, and do the tests actually prove it",
-  "maintainability and repo standards: dead code, needless abstraction, naming, standards-doc violations",
-]
+const AXES = new Set(["standards", "spec"])
 
 // ---------------------------------------------------------------------------
 // Boundary parsing — external model output is untrusted data; validate hard.
@@ -124,12 +133,18 @@ export function validateClaims(value: unknown): Claim[] {
     if (typeof severity !== "string" || !SEVERITIES.has(severity)) {
       throw new Error('claim needs suggestedSeverity critical|high|medium|low')
     }
+    const axis = record.axis
+    if (typeof axis !== "string" || !AXES.has(axis)) {
+      throw new Error('claim needs axis "standards"|"spec"')
+    }
     return {
       id: str(record, "id"),
       title: str(record, "title"),
       locations: locations(record.locations),
       explanation: str(record, "explanation"),
       suggestedSeverity: severity,
+      axis,
+      ...(record.hardViolation === true ? { hardViolation: true } : {}),
     }
   })
 }
@@ -237,13 +252,71 @@ function accountingErrors(
   return errors
 }
 
-const reviewPrompt = (lens: string, base: string, head: string): string =>
-  `You are one of several independent reviewers of a change. You are strictly read-only: never edit, create, stage, commit, or delete anything.
-Review the COMPLETE diff: git diff ${base}...${head}. Read surrounding code as needed.
-Your primary lens: ${lens}. Still report anything important outside it.
-Submit evidence only, as claims: what is wrong, where, and why. Do not classify or fix. An empty claims array states you found nothing.
+// The reviewer prompt is a self-contained port of the user's battle-tested
+// /code-review opencode command (the code-review skill): each review agent
+// runs the same two-axis procedure regardless of whether its harness has the
+// skill installed.
+
+const SMELL_BASELINE = [
+  "Mysterious Name — a name that doesn't reveal what it does or holds → rename; no honest name means murky design",
+  "Duplicated Code — the same logic shape in more than one hunk or file → extract the shared shape, call it from both",
+  "Feature Envy — a method reaching into another object's data more than its own → move it onto the data it envies",
+  "Data Clumps — the same few fields or params keep travelling together → bundle them into one type",
+  "Primitive Obsession — a primitive standing in for a domain concept → give the concept its own small type",
+  "Repeated Switches — the same switch/if-cascade on the same type recurs → polymorphism, or one shared map",
+  "Shotgun Surgery — one logical change forces scattered edits across many files → gather what changes into one module",
+  "Divergent Change — one module edited for several unrelated reasons → split so each changes for one reason",
+  "Speculative Generality — abstraction or hooks for needs the spec doesn't have → delete; inline until a real need shows",
+  "Message Chains — long a.b().c().d() navigation → hide the walk behind one method on the first object",
+  "Middle Man — a class or function that mostly delegates onward → cut it, call the target direct",
+  "Refused Bequest — an implementer ignoring most of what it inherits → drop the inheritance, use composition",
+].map((line) => `   - ${line}`).join("\n")
+
+/**
+ * Findings inherit their axis from the claims they source — never from the
+ * verifier's say-so. Axis of the first source wins; hardViolation is
+ * contagious (a smell merged into a documented-standard breach stays hard).
+ */
+export function assignAxes(
+  reports: readonly { reportID: string; claims: readonly Claim[] }[],
+  findings: readonly Finding[],
+): Finding[] {
+  const byRef = new Map<string, Claim>()
+  for (const report of reports) for (const claim of report.claims) {
+    byRef.set(`${report.reportID}:${claim.id}`, claim)
+  }
+  return findings.map((finding) => {
+    const sources = finding.sourceClaimReferences
+      .map((ref) => byRef.get(ref))
+      .filter((claim) => claim !== undefined)
+    return {
+      ...finding,
+      axis: sources[0]?.axis,
+      hardViolation: sources.some((claim) => claim.hardViolation === true) ? true : undefined,
+    }
+  })
+}
+
+export const reviewPrompt = (base: string, head: string): string =>
+  `You are an independent reviewer executing this code-review procedure exactly. You are strictly read-only: never edit, create, stage, commit, or delete anything.
+The change under review — fixed point already validated:
+- diff: git diff ${base}...${head}
+- commits: git log ${base}..${head} --oneline
+
+Procedure:
+1. Run both commands and confirm the diff is non-empty. An empty diff means an empty claims array.
+2. Identify the spec, in this order: (a) issue references in the commit messages ("#123", "Closes #45") — open them if your tools allow; (b) a spec file under docs/, specs/, or .scratch/ matching the branch or feature. If nothing is found, skip the Spec axis entirely.
+3. Identify standards sources: anything in the repo documenting how code should be written (CODING_STANDARDS.md, CONTRIBUTING.md, AGENTS.md, ...). Documented repo standards override the smell baseline below, and anything tooling already enforces is skipped.
+4. Review along two separate axes:
+   - Standards: every place the diff violates a documented standard — cite the file and the rule, and mark such claims "hardViolation":true (the only case where that flag may be set); plus any baseline smell you spot — name it and quote the hunk. Baseline smells are always judgement calls, never hard violations.
+   - Spec: requirements the spec asked for but are missing or partial; behaviour nobody asked for (scope creep); implementations that look wrong. Quote the spec line for each Spec claim.
+5. Submit evidence as claims: what is wrong, where, why, which axis. Do not classify disposition and do not propose fixes. An empty claims array states you found nothing.
+
+Smell baseline (what it is → how to fix):
+${SMELL_BASELINE}
+
 Reply with ONLY a JSON object, no prose:
-{"claims":[{"id":"slug","title":"...","locations":[{"path":"src/x.ts","line":10}],"explanation":"why this is wrong","suggestedSeverity":"critical|high|medium|low"}]}`
+{"claims":[{"id":"slug","title":"...","locations":[{"path":"src/x.ts","line":10}],"explanation":"why this is wrong","suggestedSeverity":"critical|high|medium|low","axis":"standards|spec","hardViolation":true}]}`
 
 const verifierPrompt = (round: number, reports: unknown, priorFindings: readonly Finding[]): string =>
   `You are the findings verifier for round ${round} of a multi-round code review. Work read-only; re-read the actual code before deciding.
@@ -255,6 +328,7 @@ ${JSON.stringify(priorFindings)}
 
 Rules:
 - Merge duplicate claims into one finding; assign EVERY claim of EVERY report exactly once via sourceClaimReferences of the form "<report-id>:<claim-id>". You may add your own findings with an empty array.
+- Never merge claims from different axes into one finding.
 - verification "false-positive" requires rejectionReason and omits disposition. Otherwise give decisionReason, kind ("merge-blocker"|"improvement"), severity, disposition ("fix-now"|"follow-up"|"skip").
 - An earlier finding no report mentions is resolved: do not restate it.
 Reply with ONLY:
@@ -271,9 +345,7 @@ export async function runTriReview(deps: TriReviewDeps): Promise<TriReviewResult
       deps.reviewers.map(async (factory, i) => {
         const agent = agents[i]
         if (agent === undefined) throw new Error(`missing session for reviewer ${factory.id}`)
-        const lens = LENSES[i % LENSES.length]
-        if (lens === undefined) throw new Error(`no lens for reviewer ${factory.id}`)
-        const claims = await askValidated(agent, reviewPrompt(lens, deps.base, deps.head), validateClaims, deps.timeoutMs)
+        const claims = await askValidated(agent, reviewPrompt(deps.base, deps.head), validateClaims, deps.timeoutMs)
         return { reportID: factory.id, claims }
       }),
     )
@@ -291,10 +363,11 @@ export async function runTriReview(deps: TriReviewDeps): Promise<TriReviewResult
     if (errors.length > 0) {
       return { status: "accounting-failed", rounds, findings, outstandingFixNow: [] }
     }
+    const withAxes = assignAxes(reports, findings)
 
-    const verified = findings.filter((finding) => finding.verification === "verified")
+    const verified = withAxes.filter((finding) => finding.verification === "verified")
     priorFindings = verified
-    const summary: RoundSummary = { round, claims: reports.reduce((n, r) => n + r.claims.length, 0), findings }
+    const summary: RoundSummary = { round, claims: reports.reduce((n, r) => n + r.claims.length, 0), findings: withAxes }
     rounds.push(summary)
     deps.onRound?.(summary)
 
@@ -316,6 +389,48 @@ function latestAll(rounds: readonly RoundSummary[]): Finding[] {
   const map = new Map<string, Finding>()
   for (const round of rounds) for (const finding of round.findings) map.set(finding.id, finding)
   return [...map.values()]
+}
+
+const SEVERITY_ORDER = ["critical", "high", "medium", "low"] as const
+
+function bySeverityDesc(a: Finding, b: Finding): number {
+  const rank = (f: Finding) => {
+    const i = SEVERITY_ORDER.indexOf((f.severity ?? "low") as (typeof SEVERITY_ORDER)[number])
+    return i === -1 ? SEVERITY_ORDER.length : i
+  }
+  return rank(a) - rank(b)
+}
+
+/**
+ * The code-review skill's aggregate step: the two axes presented separately,
+ * never merged or reranked across axes, one summary line per axis naming its
+ * worst issue.
+ */
+export function renderReport(result: TriReviewResult): string {
+  const sections: string[] = []
+  for (const axis of ["standards", "spec"]) {
+    const items = result.findings
+      .filter((f) => f.axis === axis && f.verification === "verified")
+      .sort(bySeverityDesc)
+    const heading = axis === "standards" ? "## Standards" : "## Spec"
+    if (items.length === 0) {
+      sections.push(`${heading}\n\nNo findings.`)
+      continue
+    }
+    const body = items.map((f) => {
+      const where = f.locations.map((l) => `${l.path}:${l.line}`).join(", ")
+      const hard = f.hardViolation === true ? " [hard violation]" : ""
+      const disposition = f.disposition !== undefined ? ` (${f.disposition}${f.severity ? `, ${f.severity}` : ""})` : ""
+      return `### ${f.id}: ${f.title}${hard}\n- at: ${where}\n${f.explanation}\n- verdict:${disposition}`
+    })
+    const worst = items.find((f) => f.disposition === "fix-now") ?? items[0]
+    const worstLine =
+      worst === undefined
+        ? "No findings."
+        : `**Worst:** ${worst.id} — ${worst.title} (${worst.severity ?? "unranked"})`
+    sections.push(`${heading}\n\n${body.join("\n\n")}\n\n${items.length} finding(s). ${worstLine}`)
+  }
+  return sections.join("\n\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -460,7 +575,13 @@ async function main(): Promise<void> {
     if (prepared !== undefined) sh(["git", "checkout", prepared.previousRef])
   }
 
-  console.log(JSON.stringify(result, null, 2))
+  console.log(renderReport(result))
+  if (result.status === "round-limit") {
+    console.error(`\nround limit hit with outstanding fix-now findings: ${result.outstandingFixNow.join(", ")}`)
+  }
+  if (result.status === "accounting-failed") {
+    console.error("\naccounting failed: the verifier mis-assigned claims — see result JSON in the transcript")
+  }
   process.exit(result.status === "clean" ? 0 : 1)
 }
 

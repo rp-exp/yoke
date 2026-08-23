@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test"
 import type { AgentFactory, RoundAgent } from "../examples/tri-review-rounds.ts"
 import {
+  assignAxes,
   parseJsonReply,
   parsePrRef,
+  renderReport,
   runTriReview,
   validateClaims,
   validateFindings,
@@ -36,6 +38,7 @@ const CLAIMS = (ids: string[]) =>
       locations: [{ path: "src/x.ts", line: 1 }],
       explanation: "e",
       suggestedSeverity: "high",
+      axis: "standards",
     })),
   })
 
@@ -91,7 +94,93 @@ describe("boundary parsing", () => {
     expect(() => validateClaims([{ id: "a" }])).toThrow()
     expect(() => validateFindings({ findings: [{ id: "f", sourceClaimReferences: [] }] })).toThrow()
   })
+
+  test("claims must carry a known axis", () => {
+    const badAxis = JSON.parse(CLAIMS(["a"]).replace('"axis":"standards"', '"axis":"vibes"'))
+    expect(() => validateClaims(badAxis)).toThrow(/axis/)
+    const noAxis = JSON.parse(CLAIMS(["a"]).replace(',"axis":"standards"', ""))
+    expect(() => validateClaims(noAxis)).toThrow(/axis/)
+  })
 })
+
+describe("axis derivation and report", () => {
+  test("findings inherit axis from their sourcing claims, not from the verifier", () => {
+    const reports = [
+      {
+        reportID: "r1",
+        claims: [
+          { ...claimOf("hard1"), axis: "standards", hardViolation: true as const },
+          { ...claimOf("spec1"), axis: "spec" },
+        ],
+      },
+    ]
+    const findings = validateFindings({
+      findings: [
+        { ...findingOf("F1", ["r1:hard1"]), verification: "verified" },
+        { ...findingOf("F2", ["r1:spec1"]), verification: "verified" },
+        { ...findingOf("F3", []), verification: "verified" },
+      ],
+    })
+    const [f1, f2, f3] = assignAxes(reports, findings)
+    expect(f1?.axis).toBe("standards")
+    expect(f1?.hardViolation).toBe(true)
+    expect(f2?.axis).toBe("spec")
+    expect(f2?.hardViolation).toBeUndefined()
+    // Own verifier-added finding has no sources to inherit from.
+    expect(f3?.axis).toBeUndefined()
+  })
+
+  test("report presents the two axes separately with per-axis worst issue", () => {
+    const reports = [
+      {
+        reportID: "r1",
+        claims: [
+          { ...claimOf("h"), axis: "standards", hardViolation: true as const },
+          { ...claimOf("s"), axis: "spec" },
+        ],
+      },
+    ]
+    const raw = validateFindings({
+      findings: [
+        { ...findingOf("SPEC-LOW", ["r1:s"]), severity: "low", disposition: "follow-up", verification: "verified" },
+        { ...findingOf("STD-HIGH", ["r1:h"]), severity: "high", disposition: "fix-now", verification: "verified" },
+        { ...findingOf("REJECTED", ["r1:h"]), verification: "false-positive", rejectionReason: "not in diff" },
+      ],
+    })
+    const report = renderReport({
+      status: "round-limit",
+      rounds: [],
+      findings: assignAxes(reports, raw),
+      outstandingFixNow: [],
+    })
+    expect(report).toMatch(/## Standards\n/)
+    expect(report).toMatch(/## Spec\n/)
+    expect(report).toContain("[hard violation]")
+    expect(report).toContain("Worst:** STD-HIGH")
+    // Rejected findings never surface.
+    expect(report).not.toContain("REJECTED")
+  })
+})
+
+function claimOf(id: string) {
+  return {
+    id,
+    title: `t-${id}`,
+    locations: [{ path: "src/x.ts", line: 1 }],
+    explanation: "e",
+    suggestedSeverity: "high",
+  }
+}
+
+function findingOf(id: string, refs: string[]) {
+  return {
+    id,
+    title: `t-${id}`,
+    locations: [{ path: "src/x.ts", line: 1 }],
+    explanation: "e",
+    sourceClaimReferences: refs,
+  }
+}
 
 describe("pr ref parsing", () => {
   test("accepts every documented form", () => {
