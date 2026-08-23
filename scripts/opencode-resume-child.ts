@@ -11,6 +11,7 @@ if (ref === undefined || input === undefined) {
 }
 
 const harness = await open("opencode")
+// No model needed when resuming: the session already carries its own.
 const session = await harness.createSession({ cwd: process.cwd(), sessionRef: sessionRef(ref) })
 const result = await session.prompt(input)
 await session.dispose()

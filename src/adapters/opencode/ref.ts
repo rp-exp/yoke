@@ -34,3 +34,19 @@ export function decodeRef(ref: SessionRef): string {
   }
   return id
 }
+
+/**
+ * Splits the harness-native "providerID/modelID" vocabulary. Deliberately
+ * shallow — yoke doesn't know model names, it only refuses to guess.
+ */
+export function parseModelRef(model: string): { providerID: string; id: string } {
+  const slash = model.indexOf("/")
+  if (slash <= 0 || slash === model.length - 1) {
+    throw new YokeError(
+      "opencode",
+      `model must be "providerID/modelID", got ${JSON.stringify(model)}`,
+      { raw: model },
+    )
+  }
+  return { providerID: model.slice(0, slash), id: model.slice(slash + 1) }
+}

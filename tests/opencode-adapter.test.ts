@@ -154,6 +154,40 @@ describe("opencode harness turns", () => {
   })
 })
 
+describe("opencode model passthrough", () => {
+  test("model string reaches the server as provider/model", async () => {
+    let createdWith: unknown
+    const { client } = fakeClient({})
+    const patched: OpenCodeLike = {
+      ...client,
+      session: {
+        ...client.session,
+        create: async (input) => {
+          createdWith = input
+          return client.session.create(input)
+        },
+      },
+    }
+    const harness = createOpenCodeHarness(patched)
+    const session = await harness.createSession({ cwd: CWD, model: "opencode-go/kimi-k3" })
+    await session.dispose()
+    expect(createdWith).toEqual({
+      location: { directory: CWD },
+      model: { providerID: "opencode-go", id: "kimi-k3" },
+    })
+  })
+
+  test("malformed model strings fail loudly without a network call", async () => {
+    const { client, calls } = fakeClient({})
+    const harness = createOpenCodeHarness(client)
+    await expect(harness.createSession({ cwd: CWD, model: "no-slash" })).rejects.toThrow(
+      /providerID\/modelID/,
+    )
+    await expect(harness.createSession({ cwd: CWD, model: "/leading" })).rejects.toThrow(YokeError)
+    expect(calls).not.toContain("create")
+  })
+})
+
 describe("opencode harness resume + gate contract", () => {
   test("resume validates the session exists; unknown refs fail loudly", async () => {
     const ok = fakeClient({})

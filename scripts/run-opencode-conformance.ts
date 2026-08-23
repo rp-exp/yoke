@@ -8,13 +8,22 @@ import "../src/adapters/opencode/index.ts"
  * Requires `opencode2` installed and logged in. Run: bun run conformance:opencode
  */
 
+const MODEL = process.env.YOKE_MODEL ?? "opencode-go/kimi-k3"
+
 const subject: TierASubject = {
   harnessId: "opencode",
   tier: "A",
   // Stays in flight long enough for busy/abort windows. Adjust if your
   // permission config denies shell commands to the default agent.
   slowPrompt: "Use the shell tool to run exactly `sleep 8`, then reply with exactly: ok",
-  open: () => open("opencode"),
+  open: async () => {
+    const base = await open("opencode")
+    // Model is explicit so runs never depend on the service's default model.
+    return {
+      id: base.id,
+      createSession: (opts) => base.createSession({ ...opts, model: MODEL }),
+    }
+  },
   resumeInChildProcess: async (ref, input) => {
     const proc = Bun.spawnSync(["bun", "scripts/opencode-resume-child.ts", ref, input])
     const stdout = proc.stdout.toString().trim()

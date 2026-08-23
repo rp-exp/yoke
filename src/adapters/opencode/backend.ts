@@ -3,7 +3,7 @@ import type { TurnBackend } from "../../session-gate.ts"
 import { SessionGate } from "../../session-gate.ts"
 import type { Harness, TurnResult } from "../../types.ts"
 import type { OpenCodeLike } from "./client-like.ts"
-import { decodeRef, encodeRef, assertSessionID } from "./ref.ts"
+import { decodeRef, encodeRef, assertSessionID, parseModelRef } from "./ref.ts"
 import type { SessionMessageAssistant } from "@opencode-ai/client"
 
 /**
@@ -80,7 +80,10 @@ export function createOpenCodeHarness(client: OpenCodeLike): Harness {
             : new YokeError("opencode", `no live session for ref ${JSON.stringify(opts.sessionRef)}`, { cause })
         }
       } else {
-        const info = await client.session.create({ location: { directory: opts.cwd } })
+        const info = await client.session.create({
+          location: { directory: opts.cwd },
+          ...(opts.model !== undefined ? { model: parseModelRef(opts.model) } : {}),
+        })
         sessionID = assertSessionID(info.id)
       }
       return new SessionGate(new OpenCodeBackend(client, sessionID))

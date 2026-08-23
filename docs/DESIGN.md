@@ -27,6 +27,11 @@ interface SessionOptions {
   cwd: string
   /** Pass a ref from serialize() to resume instead of starting fresh. */
   sessionRef?: SessionRef
+  /**
+   * Opaque model string in the harness's native vocabulary (e.g. "provider/model").
+   * Pass-through only — never a registry; omit to use the harness's own default.
+   */
+  model?: string
 }
 
 interface SessionHandle {
