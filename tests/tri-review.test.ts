@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import type { AgentFactory, RoundAgent } from "../examples/tri-review-rounds.ts"
 import {
   parseJsonReply,
+  parsePrRef,
   runTriReview,
   validateClaims,
   validateFindings,
@@ -92,6 +93,20 @@ describe("boundary parsing", () => {
   })
 })
 
+describe("pr ref parsing", () => {
+  test("accepts every documented form", () => {
+    expect(parsePrRef("42")).toEqual({ number: "42" })
+    expect(parsePrRef(" #42 ")).toEqual({ number: "42" })
+    expect(parsePrRef("rp-exp/yoke#42")).toEqual({ repo: "rp-exp/yoke", number: "42" })
+    expect(parsePrRef("https://github.com/rp-exp/yoke/pull/7")).toEqual({ repo: "rp-exp/yoke", number: "7" })
+  })
+
+  test("rejects garbage loudly", () => {
+    expect(() => parsePrRef("main")).toThrow(/cannot parse PR reference/)
+    expect(() => parsePrRef("https://github.com/rp-exp/yoke/tree/main")).toThrow(/cannot parse PR reference/)
+  })
+})
+
 describe("tri-review orchestration", () => {
   test("clean first round stops immediately", async () => {
     const result = await runTriReview({
@@ -132,6 +147,7 @@ describe("tri-review orchestration", () => {
 
   test("round limit reports outstanding findings instead of looping forever", async () => {
     const reviewers = fakeReviewers([[CLAIMS(["x"]), CLAIMS([]), CLAIMS([])]])
+    const roundsSeen: number[] = []
     const result = await runTriReview({
       reviewers,
       verifier: fakeVerifier([FINDINGS([{ id: "F1", sources: ["opencode:x"], disposition: "fix-now" }])]),
@@ -139,9 +155,11 @@ describe("tri-review orchestration", () => {
       head: HEAD,
       maxRounds: 2,
       timeoutMs: 5_000,
+      onRound: (summary) => roundsSeen.push(summary.round),
     })
     expect(result.status).toBe("round-limit")
     expect(result.outstandingFixNow).toEqual(["F1"])
+    expect(roundsSeen).toEqual([1, 2])
   })
 
   test("malformed reviewer output is retried once against the same session", async () => {

@@ -13,8 +13,12 @@ import type { SessionHandle } from "../src/types.ts"
  * The orchestration core below is pure over a minimal agent seam so it is
  * unit-testable without any harness installed; only `main()` touches yoke.
  *
- * Run from a checkout of the PR's head:
- *   bun examples/tri-review-rounds.ts <base-sha> <head-sha> [--max-rounds N]
+ * Run from any clean checkout of the repo; pass a pull request and the script
+ * checks it out detached itself (restoring your previous ref afterwards):
+ *   bun examples/tri-review-rounds.ts 42
+ *   bun examples/tri-review-rounds.ts owner/repo#42 [--max-rounds N]
+ * Or point it directly at a diff you already have checked out:
+ *   bun examples/tri-review-rounds.ts <base-sha> <head-sha>
  */
 
 // ---------------------------------------------------------------------------
@@ -166,6 +170,8 @@ export interface TriReviewDeps {
   readonly head: string
   readonly maxRounds: number
   readonly timeoutMs: number
+  /** Called after each round for live progress reporting. */
+  onRound?: (summary: RoundSummary) => void
 }
 
 export interface RoundSummary {
@@ -288,7 +294,9 @@ export async function runTriReview(deps: TriReviewDeps): Promise<TriReviewResult
 
     const verified = findings.filter((finding) => finding.verification === "verified")
     priorFindings = verified
-    rounds.push({ round, claims: reports.reduce((n, r) => n + r.claims.length, 0), findings })
+    const summary: RoundSummary = { round, claims: reports.reduce((n, r) => n + r.claims.length, 0), findings }
+    rounds.push(summary)
+    deps.onRound?.(summary)
 
     if (!verified.some((finding) => finding.disposition === "fix-now")) {
       return { status: "clean", rounds, findings: latestAll(rounds), outstandingFixNow: [] }
@@ -311,24 +319,98 @@ function latestAll(rounds: readonly RoundSummary[]): Finding[] {
 }
 
 // ---------------------------------------------------------------------------
-// Live wiring — the only place real harnesses appear.
+// Live wiring — the only place real harnesses and git/gh appear.
+
+export interface PrRef {
+  /** owner/repo when the reference carried it; otherwise gh resolves from cwd. */
+  readonly repo?: string
+  readonly number: string
+}
+
+/** Accepts "42", "#42", "owner/repo#42", or a github.com pull request URL. */
+export function parsePrRef(raw: string): PrRef {
+  const value = raw.trim()
+  const url = value.match(/^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)/)
+  if (url !== null && url[1] !== undefined && url[2] !== undefined) {
+    return { repo: url[1], number: url[2] }
+  }
+  const short = value.match(/^(?:([\w.-]+\/[\w.-]+))?#?(\d+)$/)
+  if (short !== null && short[2] !== undefined) {
+    return short[1] !== undefined ? { repo: short[1], number: short[2] } : { number: short[2] }
+  }
+  throw new Error(`cannot parse PR reference ${JSON.stringify(raw)} (try "42", "#42", "owner/repo#42" or a PR URL)`)
+}
+
+/** Runs a command, failing loudly with its stderr. Never inherits stdio. */
+function sh(cmd: readonly string[]): string {
+  const proc = Bun.spawnSync([...cmd], { stdout: "pipe", stderr: "pipe" })
+  if (proc.exitCode !== 0) {
+    throw new Error(`${cmd.join(" ")} failed (${proc.exitCode}): ${proc.stderr.toString().trim()}`)
+  }
+  return proc.stdout.toString().trim()
+}
+
+interface PreparedPr {
+  readonly url: string
+  readonly base: string
+  readonly head: string
+  readonly previousRef: string
+  readonly repoArg: readonly string[]
+}
+
+function preparePr(ref: PrRef): PreparedPr {
+  const repoArg = ref.repo !== undefined ? ["--repo", ref.repo] : []
+  const dirty = sh(["git", "status", "--porcelain"])
+  if (dirty !== "") {
+    throw new Error(`working tree is dirty — commit or stash before reviewing:\n${dirty}`)
+  }
+  const branch = Bun.spawnSync(["git", "symbolic-ref", "--short", "HEAD"], { stdout: "pipe", stderr: "pipe" })
+  // Detached HEAD has no branch name; the SHA restores just as well.
+  const previousRef =
+    branch.exitCode === 0 ? branch.stdout.toString().trim() : sh(["git", "rev-parse", "HEAD"])
+
+  sh(["gh", "pr", "checkout", ref.number, "--detach", ...repoArg])
+  const view = sh(["gh", "pr", "view", ref.number, "--json", "url,baseRefOid,headRefOid", ...repoArg])
+  const info = JSON.parse(view) as { url: string; baseRefOid: string; headRefOid: string }
+  console.log(`reviewing ${info.url} at ${info.headRefOid.slice(0, 10)} (base ${info.baseRefOid.slice(0, 10)})`)
+  return { url: info.url, base: info.baseRefOid, head: info.headRefOid, previousRef, repoArg }
+}
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2)
-  const [base, head] = argv
-  if (base === undefined || head === undefined) {
-    console.error("usage: bun examples/tri-review-rounds.ts <base-sha> <head-sha> [--max-rounds N]")
-    process.exit(2)
+  const positional: string[] = []
+  let maxRounds = 3
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === "--max-rounds") {
+      maxRounds = Number(argv[i + 1])
+      if (!Number.isInteger(maxRounds) || maxRounds < 1) throw new Error("--max-rounds needs a positive integer")
+      i += 1
+    } else {
+      positional.push(argv[i] as string)
+    }
   }
-  const maxRoundsFlag = argv.indexOf("--max-rounds")
-  const maxRounds = maxRoundsFlag >= 0 ? Number(argv[maxRoundsFlag + 1]) || 3 : 3
-  const cwd = process.cwd()
 
-  // Self-referencing package imports — identical to what a downstream
-  // consumer writes after installing yoke from git. Each adapter module
-  // registers itself on import; `open` resolves through the shared registry.
   await Promise.all([import("yoke/opencode"), import("yoke/claude-code"), import("yoke/cursor")])
   const { open } = await import("yoke")
+
+  let prepared: PreparedPr | undefined
+  let base: string
+  let head: string
+  if (positional.length === 1) {
+    prepared = preparePr(parsePrRef(positional[0] as string))
+    base = prepared.base
+    head = prepared.head
+  } else if (positional.length === 2) {
+    ;[base, head] = positional as [string, string]
+  } else {
+    console.error(
+      "usage: bun examples/tri-review-rounds.ts <pr> [--max-rounds N]\n" +
+        "       bun examples/tri-review-rounds.ts <base-sha> <head-sha>\n" +
+        '       <pr> is "42", "#42", "owner/repo#42", or a github.com PR URL',
+    )
+    process.exit(2)
+  }
+  const cwd = process.cwd()
 
   const factories: AgentFactory[] = [
     {
@@ -359,14 +441,24 @@ async function main(): Promise<void> {
     fresh: async () => handleToRoundAgent(await (await open("opencode")).createSession({ cwd })),
   }
 
-  const result = await runTriReview({
-    reviewers: factories,
-    verifier: verifierFactory,
-    base,
-    head,
-    maxRounds,
-    timeoutMs: 15 * 60_000,
-  })
+  let result: Awaited<ReturnType<typeof runTriReview>>
+  try {
+    result = await runTriReview({
+      reviewers: factories,
+      verifier: verifierFactory,
+      base,
+      head,
+      maxRounds,
+      timeoutMs: 15 * 60_000,
+      onRound: ({ round, claims, findings }) => {
+        const fixNow = findings.filter((f) => f.disposition === "fix-now").length
+        console.log(`round ${round}: ${claims} claims, ${findings.length} findings (${fixNow} fix-now)`)
+      },
+    })
+  } finally {
+    // The review is read-only, so whatever gh checked out can always go back.
+    if (prepared !== undefined) sh(["git", "checkout", prepared.previousRef])
+  }
 
   console.log(JSON.stringify(result, null, 2))
   process.exit(result.status === "clean" ? 0 : 1)
