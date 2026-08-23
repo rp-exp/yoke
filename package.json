@@ -10,7 +10,8 @@
   },
   "exports": {
     ".": "./src/index.ts",
-    "./opencode": "./src/adapters/opencode/index.ts"
+    "./opencode": "./src/adapters/opencode/index.ts",
+    "./conformance": "./src/conformance/index.ts"
   },
   "peerDependencies": {
     "@opencode-ai/client": "*",
