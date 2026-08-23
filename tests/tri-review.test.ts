@@ -3,13 +3,20 @@ import { YokeError } from "../src/errors.ts"
 import type { AgentFactory, RoundAgent } from "../examples/tri-review-rounds.ts"
 import {
   assignAxes,
+  isTransientTurnFailure,
   parseJsonReply,
   parsePrRef,
   renderReport,
+  retryBackoffMs,
   runTriReview,
   validateClaims,
   validateFindings,
 } from "../examples/tri-review-rounds.ts"
+
+const transientFailure = () =>
+  new YokeError("opencode", "turn failed", {
+    raw: { error: { type: "provider.invalid-output", message: "The provider response ended with an unknown finish reason." } },
+  })
 
 const BASE = "aaa111"
 const HEAD = "bbb222"
@@ -317,6 +324,118 @@ describe("tri-review orchestration", () => {
     expect(run).rejects.toThrow(YokeError)
     await run.catch((err: Error) => expect(err.message).toMatch(/turn failed/))
     expect(prompts).toBe(1)
+  })
+
+  test("transient harness failure retries on a fresh session until attempts run out", async () => {
+    let sessionCount = 0
+    const alwaysFlaky: AgentFactory = {
+      id: "flaky-provider",
+      fresh: async () => {
+        sessionCount += 1
+        return {
+          prompt() {
+            throw transientFailure()
+          },
+          abort: async () => {},
+          dispose: async () => {},
+        }
+      },
+    }
+    const run = runTriReview({
+      reviewers: [alwaysFlaky, ...fakeReviewers([[CLAIMS([]), CLAIMS([])]])],
+      verifier: fakeVerifier([FINDINGS([])]),
+      base: BASE,
+      head: HEAD,
+      maxRounds: 1,
+      timeoutMs: 5_000,
+      backoffMs: () => 0, // no real sleeping in tests; schedule tested separately
+    })
+    await expect(run).rejects.toThrow(YokeError)
+    expect(sessionCount).toBe(5) // MAX_ATTEMPTS, then loud failure
+  })
+
+  test("recovers when a later session succeeds after transient failures", async () => {
+    const retries: string[] = []
+    let sessionCount = 0
+    const flaky: AgentFactory = {
+      id: "flaky-provider",
+      fresh: async () => {
+        sessionCount += 1
+        const broken = sessionCount <= 2
+        return {
+          prompt() {
+            if (broken) throw transientFailure()
+            return Promise.resolve(CLAIMS(["ok"]))
+          },
+          abort: async () => {},
+          dispose: async () => {},
+        }
+      },
+    }
+    const result = await runTriReview({
+      reviewers: [flaky, ...fakeReviewers([[CLAIMS([]), CLAIMS([])]])],
+      verifier: fakeVerifier([FINDINGS([{ id: "F1", sources: ["flaky-provider:ok"], disposition: "skip" }])]),
+      base: BASE,
+      head: HEAD,
+      maxRounds: 1,
+      timeoutMs: 5_000,
+      onRetry: (message) => retries.push(message),
+      backoffMs: () => 0,
+    })
+    expect(result.status).toBe("clean")
+    expect(sessionCount).toBe(3) // two transient failures, third session delivers
+    expect(retries).toHaveLength(2)
+    expect(retries[0]).toMatch(/attempt 2\/5/)
+    expect(retries[1]).toMatch(/attempt 3\/5/)
+  })
+
+  test("permanent harness failure never retries", async () => {
+    let sessions = 0
+    const policyBlocked: AgentFactory = {
+      id: "policy-blocked",
+      fresh: async () => {
+        sessions += 1
+        return {
+          prompt() {
+            throw new YokeError("opencode", "turn failed", {
+              raw: { error: { type: "provider.invalid-request", message: "No endpoints available" } },
+            })
+          },
+          abort: async () => {},
+          dispose: async () => {},
+        }
+      },
+    }
+    const run = runTriReview({
+      reviewers: [policyBlocked, ...fakeReviewers([[CLAIMS([]), CLAIMS([])]])],
+      verifier: fakeVerifier([FINDINGS([])]),
+      base: BASE,
+      head: HEAD,
+      maxRounds: 1,
+      timeoutMs: 5_000,
+    })
+    await expect(run).rejects.toThrow(YokeError)
+    expect(sessions).toBe(1) // one attempt, no fresh-session retry
+  })
+
+  test("backoff grows exponentially and caps at two minutes", () => {
+    expect(retryBackoffMs(1)).toBe(2_000)
+    expect(retryBackoffMs(2)).toBe(8_000)
+    expect(retryBackoffMs(3)).toBe(32_000)
+    expect(retryBackoffMs(4)).toBe(120_000)
+    expect(retryBackoffMs(9)).toBe(120_000)
+  })
+
+  test("isTransientTurnFailure classifies real provider errors", () => {
+    expect(isTransientTurnFailure(transientFailure())).toBe(true)
+    expect(
+      isTransientTurnFailure(
+        new YokeError("opencode", "turn failed", {
+          raw: { error: { type: "provider.invalid-request", message: "guardrail" } },
+        }),
+      ),
+    ).toBe(false)
+    expect(isTransientTurnFailure(new Error("plain"))).toBe(false)
   })
 
   test("hung reviewer turn times out and aborts the whole run loudly", async () => {

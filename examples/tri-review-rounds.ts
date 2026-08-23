@@ -187,6 +187,10 @@ export interface TriReviewDeps {
   readonly timeoutMs: number
   /** Called after each round for live progress reporting. */
   onRound?: (summary: RoundSummary) => void
+  /** Called when a transient harness failure triggers a fresh-session retry. */
+  onRetry?: (message: string) => void
+  /** Backoff between transient retries, ms, by attempt number. Defaults to retryBackoffMs. */
+  backoffMs?: (attempt: number) => number
 }
 
 export interface RoundSummary {
@@ -312,30 +316,109 @@ Rules:
 Reply with ONLY:
 {"findings":[{...}]}`
 
+/**
+ * Retry policy for harness-level turn failures, informed by real provider
+ * errors seen in production runs:
+ *
+ * - transient (up to 5 attempts total on FRESH sessions, exponential
+ *   backoff): provider streams dying mid-turn ("invalid-output",
+ *   overloaded models), network hiccups.
+ *   Reviewer turns here are read-only, so repeating them is safe — that
+ *   idempotency judgment is why the policy lives in this workflow, not yoke.
+ * - permanent (fail immediately): policy blocks, auth, bad requests —
+ *   retrying cannot succeed and would only burn money.
+ */
+const TRANSIENT_PATTERNS = [
+  /provider\.invalid-output/,
+  /unknown finish reason/i,
+  /overloaded/i,
+  /rate.?limit/i,
+  /ECONNRESET|ECONNREFUSED|ETIMEDOUT|fetch failed|network/i,
+]
+
+export function isTransientTurnFailure(err: unknown): boolean {
+  if (!(err instanceof YokeError)) return false
+  const haystack = `${err.message} ${JSON.stringify(err.raw ?? {})}`
+  return TRANSIENT_PATTERNS.some((pattern) => pattern.test(haystack))
+}
+
+/** Backoff before retry attempt n (1-based): 2s, 8s, 30s, 2min — capped. */
+export function retryBackoffMs(attempt: number): number {
+  return Math.min(2 * 4 ** (attempt - 1), 120) * 1000
+}
+
+/**
+ * One reviewer/verifier turn with the workflow's retry policy: transient
+ * harness failures retry on a FRESH session — up to 5 attempts total with
+ * exponential backoff (a session that just ate a failed turn is not
+ * trusted); permanent failures rethrow immediately; reply-shape errors
+ * retry against the SAME session (model just needs to reformat). Sessions
+ * are created here and always disposed. All of it loud.
+ */
+const MAX_ATTEMPTS = 5
+
+async function askWithPolicy<T>(
+  factory: AgentFactory,
+  buildPrompt: () => string,
+  validate: (value: unknown) => T,
+  timeoutMs: number,
+  log: (message: string) => void,
+  backoffMs: (attempt: number) => number,
+): Promise<T> {
+  const attemptOn = async (agent: RoundAgent): Promise<T> => {
+    try {
+      return await askValidated(agent, buildPrompt(), validate, timeoutMs)
+    } finally {
+      await agent.dispose().then(() => {}, () => {})
+    }
+  }
+
+  for (let attempt = 1; ; attempt++) {
+    const agent = await factory.fresh()
+    try {
+      return await attemptOn(agent)
+    } catch (err) {
+      if (!isTransientTurnFailure(err) || attempt >= MAX_ATTEMPTS) throw err
+      const waitMs = backoffMs(attempt)
+      log(
+        `retrying ${factory.id} (attempt ${attempt + 1}/${MAX_ATTEMPTS}) in ${Math.round(waitMs / 1000)}s ` +
+          `after transient harness failure: ${String(err)}`,
+      )
+      await new Promise((resolve) => setTimeout(resolve, waitMs))
+    }
+  }
+}
+
 export async function runTriReview(deps: TriReviewDeps): Promise<TriReviewResult> {
   const rounds: RoundSummary[] = []
   let priorFindings: Finding[] = []
 
   for (let round = 1; round <= deps.maxRounds; round++) {
     // Barrier is deliberate: the verifier needs every report at once.
-    const agents = await Promise.all(deps.reviewers.map((factory) => factory.fresh()))
     const reports = await Promise.all(
-      deps.reviewers.map(async (factory, i) => {
-        const agent = agents[i]
-        if (agent === undefined) throw new Error(`missing session for reviewer ${factory.id}`)
-        const claims = await askValidated(agent, reviewPrompt(deps.base, deps.head), validateClaims, deps.timeoutMs)
+      deps.reviewers.map(async (factory) => {
+        const claims = await askWithPolicy(
+          factory,
+          () => reviewPrompt(deps.base, deps.head),
+          validateClaims,
+          deps.timeoutMs,
+          deps.onRetry ?? (() => {}),
+          deps.backoffMs ?? retryBackoffMs,
+        )
         return { reportID: factory.id, claims }
       }),
     )
 
-    const verifier = await deps.verifier.fresh()
-    let findings: Finding[]
-    try {
-      findings = await askValidated(verifier, verifierPrompt(round, reports, priorFindings), validateFindings, deps.timeoutMs)
-    } finally {
-      // Sessions are round-scoped: release them whatever the outcome.
-      await Promise.all([...agents, verifier].map((agent) => agent.dispose().then(() => {}, () => {})))
-    }
+    const verifier = deps.verifier
+    // askWithPolicy owns session creation and disposal.
+    const findings = await askWithPolicy(
+      verifier,
+      () => verifierPrompt(round, reports, priorFindings),
+      validateFindings,
+      deps.timeoutMs,
+      deps.onRetry ?? (() => {}),
+      deps.backoffMs ?? retryBackoffMs,
+    )
 
     const errors = accountingErrors(reports, findings)
     if (errors.length > 0) {
