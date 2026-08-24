@@ -25,3 +25,17 @@ SDK package — name the exact package and version in the ask.
 Every change lands via pull request — see [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md)
 for branch naming, conventional commits, and PR rules. Direct pushes to `main`
 and history rewrites need explicit approval.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in GitHub Issues on rp-exp/yoke, driven via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default five-role vocabulary — label strings equal the role names (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: root `CONTEXT.md` + `docs/adr/`. See `docs/agents/domain.md`.
