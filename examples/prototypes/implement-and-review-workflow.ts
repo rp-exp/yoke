@@ -1,20 +1,21 @@
 /**
- * PROTOTYPE — throwaway. The chained workflow: implement, then code review,
- * fixing blockers until the review comes back clean (or rounds run out).
+ * PROTOTYPE — throwaway. The chained workflow: the `implement` command, then
+ * code review, fixing blockers and re-confirming CI until everything is green.
  *
- * The point of this file is the composition itself: `implement` and
- * `codeReview` are imported unchanged from the two standalone prototypes —
- * chaining is a plain function call, not a framework feature.
+ * The point of this file is the composition itself: `implementTicket`,
+ * `keepCiGreen`, and `codeReview` are imported unchanged from the two
+ * standalone prototypes — chaining is a plain function call, not a framework
+ * feature.
  *
- * Run against scripted fake agents (no harness needed):
- *   bun examples/prototypes/implement-and-review-workflow.ts --fake "add fizzbuzz CLI"
- * Or against real harnesses:
- *   bun examples/prototypes/implement-and-review-workflow.ts "add fizzbuzz CLI"
+ * Run against scripted fakes (no harness, no gh):
+ *   bun examples/prototypes/implement-and-review-workflow.ts --fake 42
+ * Or for real:
+ *   bun examples/prototypes/implement-and-review-workflow.ts 42
  */
 
 import { runWorkflow } from "../../src/workflow.ts"
-import { coder, registerFakes, renderReport } from "./shared.ts"
-import { implement } from "./implement-workflow.ts"
+import { coder, fakeEnv, registerFakes, renderReport, type Environment } from "./shared.ts"
+import { implementTicket, keepCiGreen, realEnv } from "./implement-workflow.ts"
 import { codeReview } from "./code-review-workflow.ts"
 
 const MAX_FIX_ROUNDS = 3
@@ -22,22 +23,28 @@ const BLOCKER_SEVERITIES = new Set(["critical", "high"])
 
 // --- The workflow
 
-async function implementAndReview(task: string): Promise<{ summary: string; report: Awaited<ReturnType<typeof codeReview>> }> {
-  const summary = await implement(task)
+async function implementReviewAndShip(
+  env: Environment,
+  ticketRef: string,
+): Promise<{ prUrl: string; report: Awaited<ReturnType<typeof codeReview>> }> {
+  const { prUrl } = await implementTicket(env, ticketRef)
 
-  let report = await codeReview(`the implementation of "${task}"`)
+  let report = await codeReview(`PR ${prUrl}`)
   for (let round = 1; report.some((f) => BLOCKER_SEVERITIES.has(f.severity)); round += 1) {
     if (round >= MAX_FIX_ROUNDS) {
       throw new Error(`still ${report.length} blocker(s) after ${MAX_FIX_ROUNDS - 1} fix rounds`)
     }
-    console.log(`round ${round}: fixing ${report.length} blocker(s)`)
+    console.log(`review round ${round}: fixing ${report.length} blocker(s)`)
     // Mutating fix turn — fail-fast default, no blind retries.
     const lines = report.map((f) => `- ${f.id} [${f.severity}] ${f.path}:${f.line} — ${f.title}`).join("\n")
     await coder.run(`Fix these review findings:\n${lines}`)
-    report = await codeReview(`the implementation of "${task}" after fixes`)
+    report = await codeReview(`PR ${prUrl} after fixes`)
   }
 
-  return { summary, report }
+  // Fixes may have touched code — CI must be green again before reporting.
+  await keepCiGreen(env, prUrl)
+
+  return { prUrl, report }
 }
 
 // --- Entry point
@@ -45,15 +52,16 @@ async function implementAndReview(task: string): Promise<{ summary: string; repo
 async function main(): Promise<void> {
   const argv = process.argv.slice(2)
   const fake = argv.includes("--fake")
-  const task = argv.filter((arg) => arg !== "--fake").join(" ")
-  if (task === "") {
-    throw new Error("usage: bun examples/prototypes/implement-and-review-workflow.ts [--fake] <task>")
+  const ticketRef = argv.filter((arg) => arg !== "--fake").join(" ") || (fake ? "42" : "")
+  if (ticketRef === "") {
+    throw new Error("usage: bun examples/prototypes/implement-and-review-workflow.ts [--fake] <ticket>")
   }
 
   if (fake) registerFakes()
 
-  const { summary, report } = await runWorkflow(() => implementAndReview(task))
-  console.log(`\n${summary}\n\nFinal review:\n${renderReport(report)}`)
+  const env = fake ? fakeEnv : realEnv
+  const { prUrl, report } = await runWorkflow(() => implementReviewAndShip(env, ticketRef))
+  console.log(`\n${prUrl} — all required checks green\n\nFinal review:\n${renderReport(report)}`)
   process.exit(report.some((f) => BLOCKER_SEVERITIES.has(f.severity)) ? 1 : 0)
 }
 

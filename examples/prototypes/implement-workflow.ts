@@ -1,50 +1,112 @@
 /**
- * PROTOTYPE — throwaway. The implement workflow written the way this repo
- * wishes it read, against a stub layer (src/workflow.ts). It answers one
- * question: is THIS the shape that makes workflows easy to read and change?
+ * PROTOTYPE — throwaway. Port of the opencode `implement` command
+ * (commands/implement.md) to the workflow stub: implement a ticket, open a PR
+ * when ready, keep CI green, report the PR URL and final CI result.
  *
- * Deliberately does NOT verify its own output — review lives in
- * code-review-workflow.ts, and the two compose in
- * implement-and-review-workflow.ts.
+ * Division of labor is the point. The command delegated everything to the
+ * agent; here the script owns every deterministic step — ticket lookup
+ * (fails fast when it resolves to nothing), PR creation, CI watching — and
+ * the agent keeps only the fuzzy step: implementing via its `implement`
+ * skill. Same five steps, same outcome, deterministic where possible.
  *
- * Run against scripted fake agents (no harness needed):
- *   bun examples/prototypes/implement-workflow.ts --fake "add fizzbuzz CLI"
- * Or against real harnesses:
- *   bun examples/prototypes/implement-workflow.ts "add fizzbuzz CLI"
+ * Run against scripted fakes (no harness, no gh):
+ *   bun examples/prototypes/implement-workflow.ts --fake 42
+ * Or for real:
+ *   bun examples/prototypes/implement-workflow.ts 42
+ *   bun examples/prototypes/implement-workflow.ts "freeform task text"
  */
 
-import { z } from "zod"
-
 import { runWorkflow } from "../../src/workflow.ts"
-import { coder, jsonShape, registerFakes } from "./shared.ts"
+import { coder, fakeEnv, registerFakes, type Environment } from "./shared.ts"
 
-// --- Schema
+// --- The real environment: gh is the boundary; failures are loud.
 
-const Plan = z.object({
-  steps: z.array(z.string().min(1)).min(1, "need at least one step"),
-})
-type Plan = z.infer<typeof Plan>
+export const realEnv: Environment = {
+  async resolveTicket(raw: string) {
+    const value = raw.trim()
+    const numbered =
+      value.match(/^(?:[\w.-]+\/[\w.-]+)?#?(\d+)$/) ?? value.match(/github\.com\/[\w.-]+\/[\w.-]+\/issues\/(\d+)/)
+    if (numbered === null) return { id: "inline", title: "Inline task", body: value }
+    const number = numbered[1]
+    if (number === undefined) throw new Error(`cannot parse ticket reference: ${JSON.stringify(raw)}`)
+    const view = sh(["gh", "issue", "view", number, "--json", "number,title,body"])
+    const info = JSON.parse(view) as { number: number; title: string; body: string }
+    return { id: `#${info.number}`, title: info.title, body: info.body }
+  },
+
+  async openPr() {
+    const view = sh(["gh", "pr", "create", "--fill", "--json", "url"])
+    return (JSON.parse(view) as { url: string }).url
+  },
+
+  async failingChecks(prUrl: string) {
+    const proc = Bun.spawnSync(["gh", "pr", "checks", prUrl, "--watch"], { stdout: "pipe", stderr: "pipe" })
+    if (proc.exitCode === 0) return []
+    return proc.stdout
+      .toString()
+      .split("\n")
+      .filter((line) => line.includes("fail"))
+      .map((line) => line.split("\t")[0]?.trim() ?? line.trim())
+  },
+}
+
+function sh(cmd: readonly string[]): string {
+  const proc = Bun.spawnSync([...cmd], { stdout: "pipe", stderr: "pipe" })
+  if (proc.exitCode !== 0) {
+    throw new Error(`${cmd.join(" ")} failed (${proc.exitCode}): ${proc.stderr.toString().trim()}`)
+  }
+  return proc.stdout.toString().trim()
+}
 
 // --- Prompts
 
-const planPrompt = (task: string): string =>
-  `Plan the implementation of this task in 1-5 concrete steps:\nTASK: ${task}\n${jsonShape(Plan)}`
+const implementPrompt = (ticket: { id: string; title: string; body: string }): string =>
+  `Implement this ticket by following your \`implement\` skill (load it via the skill tool if you haven't).\n` +
+  `Ticket ${ticket.id}: ${ticket.title}\n\n${ticket.body}\n\n` +
+  `Commit the work on a feature branch. Do not open a PR or watch CI — the orchestrator owns both.`
 
-const implementPrompt = (task: string, step: string): string =>
-  `Implement this step of the task. Work in the current directory.\nTASK: ${task}\nSTEP: ${step}`
+const ciFixPrompt = (prUrl: string, failed: readonly string[]): string =>
+  `Required CI checks are failing on ${prUrl}:\n${failed.map((name) => `- ${name}`).join("\n")}\n` +
+  `Diagnose, fix, and push.`
 
-// --- The workflow. Mutating turns keep the fail-fast default: no blind retries.
+// --- The workflow: the command's five steps, one named step each.
 
-export async function implement(task: string): Promise<string> {
-  const plan = await coder.ask(planPrompt(task), Plan)
-  console.log(`plan: ${plan.steps.join(" → ")}`)
+const MAX_CI_ROUNDS = 5
 
-  for (const [index, step] of plan.steps.entries()) {
-    await coder.run(implementPrompt(task, step))
-    console.log(`step ${index + 1}/${plan.steps.length} ok: ${step}`)
+export async function implementTicket(
+  env: Environment,
+  ticketRef: string,
+): Promise<{ ticket: { id: string; title: string }; prUrl: string }> {
+  // 1. Read the ticket. No ticket → stop and report.
+  const ticket = await env.resolveTicket(ticketRef)
+  console.log(`ticket ${ticket.id}: ${ticket.title}`)
+
+  // 2. Implement, delegating the procedure to the agent's `implement` skill.
+  await coder.run(implementPrompt(ticket))
+
+  // 3. Open a PR when the implementation is ready.
+  const prUrl = await env.openPr()
+  console.log(`opened ${prUrl}`)
+
+  // 4. Keep CI green: diagnose, fix, push again while anything fails.
+  await keepCiGreen(env, prUrl)
+
+  // 5. Report the PR URL and final CI result.
+  return { ticket, prUrl }
+}
+
+/** Reusable: the chained prototype runs it again after review fixes. */
+export async function keepCiGreen(env: Environment, prUrl: string): Promise<void> {
+  for (let round = 1; ; round += 1) {
+    const failed = await env.failingChecks(prUrl)
+    if (failed.length === 0) return
+    if (round >= MAX_CI_ROUNDS) {
+      throw new Error(`CI still failing after ${MAX_CI_ROUNDS - 1} fix rounds: ${failed.join(", ")}`)
+    }
+    console.log(`CI failing (${failed.join(", ")}); fix round ${round}/${MAX_CI_ROUNDS - 1}`)
+    // Mutating turn — fail-fast default, no blind retries.
+    await coder.run(ciFixPrompt(prUrl, failed))
   }
-
-  return coder.run(`Summarize what was implemented for: ${task}`)
 }
 
 // --- Entry point
@@ -52,13 +114,15 @@ export async function implement(task: string): Promise<string> {
 async function main(): Promise<void> {
   const argv = process.argv.slice(2)
   const fake = argv.includes("--fake")
-  const task = argv.filter((arg) => arg !== "--fake").join(" ")
-  if (task === "") throw new Error("usage: bun examples/prototypes/implement-workflow.ts [--fake] <task>")
+  const ticketRef = argv.filter((arg) => arg !== "--fake").join(" ") || (fake ? "42" : "")
+  if (ticketRef === "") {
+    throw new Error("usage: bun examples/prototypes/implement-workflow.ts [--fake] <ticket-number-or-task>")
+  }
 
   if (fake) registerFakes()
 
-  const summary = await runWorkflow(() => implement(task))
-  console.log(`\n${summary}`)
+  const { prUrl } = await runWorkflow(() => implementTicket(fake ? fakeEnv : realEnv, ticketRef))
+  console.log(`\n${prUrl} — all required checks green`)
 }
 
 if (import.meta.main) {

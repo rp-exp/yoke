@@ -86,26 +86,50 @@ export async function collectReviews(scope: string): Promise<Report> {
   return report
 }
 
-// --- Scripted fakes so any prototype runs end to end without harnesses.
+// --- Environment seam: the deterministic, world-touching steps (gh) sit
+// --- behind an interface so workflows stay pure and fakes stay trivial.
+
+export interface Ticket {
+  readonly id: string
+  readonly title: string
+  readonly body: string
+}
+
+export interface Environment {
+  /** Resolves a ticket reference; throws when it resolves to nothing. */
+  resolveTicket(raw: string): Promise<Ticket>
+  openPr(): Promise<string>
+  /** Blocks until checks finish; returns the failing check names. */
+  failingChecks(prUrl: string): Promise<readonly string[]>
+}
+
+// --- Scripted fakes so any prototype runs end to end without harnesses or gh.
+
+let ciFixed = false
+let reviewFixed = false
+const malformedTried = new Set<string>()
 
 /**
- * Narrative: before any fix turn, the auditor's very first reply is malformed
- * (demonstrating the schema-driven repair loop) and both reviewers report one
- * finding; after the coder addresses findings, both report clean.
+ * Narrative: the first CI watch fails one check (the coder fixes it and CI
+ * goes green); each reviewer's first-ever reply is malformed (the schema
+ * repair loop recovers) and reports one high finding until the coder
+ * addresses review findings.
  */
 export function registerFakes(): void {
-  let fixed = false
-  const malformedTried = new Set<string>()
+  ciFixed = false
+  reviewFixed = false
+  malformedTried.clear()
 
   fakeAgent("coder", (prompt) => {
-    if (prompt.includes("Plan the implementation")) {
-      return 'Here is my plan:\n{"steps":["write fizzbuzz module","wire up the CLI entry"]}'
+    if (prompt.includes("Diagnose, fix, and push")) {
+      ciFixed = true
+      return "Fixed the failing checks and pushed."
     }
     if (prompt.includes("Fix these")) {
-      fixed = true
-      return "Addressed the findings."
+      reviewFixed = true
+      return "Addressed the findings and pushed."
     }
-    return "Implemented the step."
+    return "Implemented the ticket on a feature branch."
   })
 
   const oneFinding = JSON.stringify({
@@ -121,9 +145,7 @@ export function registerFakes(): void {
   })
 
   const replyFor = (id: string): string => {
-    if (fixed) return '{"findings":[]}'
-    // Each reviewer's first-ever reply is malformed — refused; the refusal
-    // names the issues, and the corrected retry lands.
+    if (reviewFixed) return '{"findings":[]}'
     if (!malformedTried.has(id)) {
       malformedTried.add(id)
       return '{"findings":[{"path":"src/fizz.ts","line":3,"severity":"high"}]}'
@@ -133,4 +155,17 @@ export function registerFakes(): void {
 
   fakeAgent("reviewer", () => replyFor("reviewer"))
   fakeAgent("auditor", () => replyFor("auditor"))
+}
+
+export const fakeEnv: Environment = {
+  resolveTicket: async (raw) =>
+    /^\d+$/.test(raw.trim())
+      ? {
+          id: `#${raw.trim()}`,
+          title: "Add fizzbuzz CLI",
+          body: "Add a fizzbuzz CLI: `bun fizzbuzz <n>` prints the classic sequence. See parent spec SPEC-12.",
+        }
+      : { id: "inline", title: "Inline task", body: raw },
+  openPr: async () => "https://github.com/rp-exp/yoke/pull/7",
+  failingChecks: async () => (ciFixed ? [] : ["test"]),
 }
