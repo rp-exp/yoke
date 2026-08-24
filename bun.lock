@@ -9,6 +9,7 @@
         "@cursor/sdk": "1.0.28",
         "@opencode-ai/client": "0.0.0-beta-17963",
         "@types/bun": "^1.4.0",
+        "zod": "^4.4.3",
       },
       "peerDependencies": {
         "@anthropic-ai/claude-agent-sdk": "*",

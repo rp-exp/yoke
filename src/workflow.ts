@@ -12,6 +12,10 @@
  *   errors are auto-retried (the model just needs to reformat). Repeating a
  *   turn wholesale (`retries: "transient"`) is an explicit opt-in, because
  *   only the workflow knows a repeat is safe.
+ * - `ask()` validates via the Standard Schema interface, so schemas are
+ *   declarative (zod/valibot/arktype — no dependency on any of them here)
+ *   and TS types come from inference. Plain functions stay available for
+ *   invariants a schema can't express.
  */
 
 import { open } from "./registry.ts"
@@ -40,13 +44,49 @@ export interface TurnOptions {
   readonly onRetry?: (message: string) => void
 }
 
+/**
+ * What `ask` accepts as its validator: any Standard Schema implementation
+ * (zod, valibot, arktype — declared structurally so yoke depends on none of
+ * them), or a plain function for invariants schemas can't express. Schema
+ * failures feed the model's repair prompt; precise issue paths make the
+ * corrected retry land far more often than a generic refusal.
+ */
+export interface Validator<T> {
+  readonly "~standard": {
+    readonly validate: (value: unknown) => ValidateResult<T> | Promise<ValidateResult<T>>
+  }
+}
+
+interface ValidateResult<T> {
+  readonly value?: T
+  readonly issues?: readonly { readonly message: string; readonly path?: readonly PropertyKey[] }[]
+}
+
+function toValidatorFn<T>(validator: Validator<T> | ((value: unknown) => T)): (value: unknown) => Promise<T> {
+  if (typeof validator === "function") return async (value) => validator(value)
+  return async (value) => {
+    const result = await validator["~standard"].validate(value)
+    if (result.issues !== undefined && result.issues.length > 0) {
+      const detail = result.issues
+        .map((issue) =>
+          issue.path !== undefined && issue.path.length > 0
+            ? `${issue.path.map(String).join(".")}: ${issue.message}`
+            : `(root): ${issue.message}`,
+        )
+        .join("; ")
+      throw new Error(detail)
+    }
+    return result.value as T
+  }
+}
+
 export interface Agent {
   readonly id: string
   readonly spec: AgentSpec
   /** Plain turn; resolves with the final text. */
   run(prompt: string, opts?: TurnOptions): Promise<string>
   /** Structured turn: extract the JSON object, validate it, retry shape errors once. */
-  ask<T>(prompt: string, validate: (value: unknown) => T, opts?: TurnOptions): Promise<T>
+  ask<T>(prompt: string, validator: Validator<T> | ((value: unknown) => T), opts?: TurnOptions): Promise<T>
 }
 
 /** Names an agent; nothing is opened until its first turn. */
@@ -55,7 +95,7 @@ export function agent(id: string, spec: AgentSpec): Agent {
     id,
     spec,
     run: (prompt, opts) => turn({ id, spec }, prompt, opts ?? {}, undefined),
-    ask: (prompt, validate, opts) => turn({ id, spec }, prompt, opts ?? {}, validate),
+    ask: (prompt, validator, opts) => turn({ id, spec }, prompt, opts ?? {}, toValidatorFn(validator)),
   }
 }
 
@@ -163,7 +203,7 @@ async function turn<T>(
   a: { readonly id: string; readonly spec: AgentSpec },
   initialPrompt: string,
   opts: TurnOptions,
-  validate: ((value: unknown) => T) | undefined,
+  validate: ((value: unknown) => Promise<T>) | undefined,
 ): Promise<T> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
   let transientLeft = opts.retries === "transient" ? TRANSIENT_ATTEMPTS - 1 : 0
@@ -206,12 +246,14 @@ async function turn<T>(
     if (validate === undefined) return reply as T
 
     // Shape path: validation failures re-ask the SAME session — the model
-    // only needs to reformat; nothing about the world changed.
+    // only needs to reformat; nothing about the world changed. The refusal
+    // carries the precise schema issues so the correction is mechanical.
     try {
-      return validate(extractJson(reply))
+      return await validate(extractJson(reply))
     } catch (err) {
       if (shapeLeft === 0) throw err
       shapeLeft -= 1
+      ;(opts.onRetry ?? console.error)(`"${a.id}" reply refused, re-asking with the issues: ${String(err)}`)
       prompt = `${initialPrompt}\n\nYour previous reply was refused (${String(err)}). Reply again with ONLY corrected JSON.`
     }
   }
