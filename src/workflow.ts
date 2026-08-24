@@ -51,15 +51,26 @@ export interface TurnOptions {
  * failures feed the model's repair prompt; precise issue paths make the
  * corrected retry land far more often than a generic refusal.
  */
+interface StandardIssue {
+  readonly message: string
+  readonly path?: readonly (PropertyKey | { readonly key: PropertyKey })[] | undefined
+}
+
 export interface Validator<T> {
   readonly "~standard": {
-    readonly validate: (value: unknown) => ValidateResult<T> | Promise<ValidateResult<T>>
+    readonly validate: (
+      value: unknown,
+    ) =>
+      | { readonly value?: T; readonly issues?: readonly StandardIssue[] | undefined }
+      | Promise<{ readonly value?: T; readonly issues?: readonly StandardIssue[] | undefined }>
   }
 }
 
-interface ValidateResult<T> {
-  readonly value?: T
-  readonly issues?: readonly { readonly message: string; readonly path?: readonly PropertyKey[] }[]
+function formatPath(path: readonly (PropertyKey | { readonly key: PropertyKey })[] | undefined): string {
+  if (path === undefined || path.length === 0) return "(root)"
+  return path
+    .map((segment) => (typeof segment === "object" ? String(segment.key) : String(segment)))
+    .join(".")
 }
 
 function toValidatorFn<T>(validator: Validator<T> | ((value: unknown) => T)): (value: unknown) => Promise<T> {
@@ -67,14 +78,7 @@ function toValidatorFn<T>(validator: Validator<T> | ((value: unknown) => T)): (v
   return async (value) => {
     const result = await validator["~standard"].validate(value)
     if (result.issues !== undefined && result.issues.length > 0) {
-      const detail = result.issues
-        .map((issue) =>
-          issue.path !== undefined && issue.path.length > 0
-            ? `${issue.path.map(String).join(".")}: ${issue.message}`
-            : `(root): ${issue.message}`,
-        )
-        .join("; ")
-      throw new Error(detail)
+      throw new Error(result.issues.map((issue) => `${formatPath(issue.path)}: ${issue.message}`).join("; "))
     }
     return result.value as T
   }
