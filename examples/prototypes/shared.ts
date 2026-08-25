@@ -10,15 +10,15 @@ import { agent, fakeAgent } from "../../src/workflow.ts"
 
 // --- Agents: named once here, reused by every workflow that needs them.
 
-export const coder = agent("coder", {
+export const coder = agent("building-opencode", {
   harness: "opencode",
   model: "opencode-go/ox-alpha-free",
   effort: "high",
 })
 
-export const reviewer = agent("reviewer", { harness: "claude-code", model: "opus", effort: "high" })
+export const reviewerClaude = agent("reviewing-claude-code", { harness: "claude-code", model: "opus", effort: "high" })
 
-export const auditor = agent("auditor", { harness: "cursor", model: "grok-4.6", effort: "high" })
+export const reviewerCursor = agent("reviewing-cursor", { harness: "cursor", model: "grok-4.6", effort: "high" })
 
 // --- Schemas: declared once; TS types derive from them.
 
@@ -86,7 +86,7 @@ export function registerFakes(): void {
   reviewFixed = false
   malformedTried.clear()
 
-  fakeAgent("coder", (prompt) => {
+  fakeAgent("building-opencode", (prompt) => {
     if (prompt.includes("Diagnose, fix, and push")) {
       ciFixed = true
       return "Fixed the failing checks and pushed."
@@ -120,8 +120,8 @@ export function registerFakes(): void {
     return oneFinding
   }
 
-  fakeAgent("reviewer", () => replyFor("reviewer"))
-  fakeAgent("auditor", () => replyFor("auditor"))
+  fakeAgent("reviewing-claude-code", () => replyFor("reviewing-claude-code"))
+  fakeAgent("reviewing-cursor", () => replyFor("reviewing-cursor"))
 }
 
 export const fakeEnv: Environment = {

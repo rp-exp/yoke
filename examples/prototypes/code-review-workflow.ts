@@ -17,7 +17,16 @@
  */
 
 import { runWorkflow } from "../../src/workflow.ts"
-import { auditor, jsonShape, reviewer, registerFakes, Review, type CodedFinding, type Report, type Severity } from "./shared.ts"
+import {
+  jsonShape,
+  registerFakes,
+  Review,
+  reviewerClaude,
+  reviewerCursor,
+  type CodedFinding,
+  type Report,
+  type Severity,
+} from "./shared.ts"
 
 // --- Prompt: procedure lives in the skill; only the contract lives here.
 
@@ -52,8 +61,8 @@ export function renderReport(report: Report): string {
 export async function codeReview(scope: string): Promise<Report> {
   const retryOpts = { retries: "transient" } as const
   const [first, second] = await Promise.all([
-    reviewer.ask(reviewPrompt(scope), Review, retryOpts),
-    auditor.ask(reviewPrompt(scope), Review, retryOpts),
+    reviewerClaude.ask(reviewPrompt(scope), Review, retryOpts),
+    reviewerCursor.ask(reviewPrompt(scope), Review, retryOpts),
   ])
   console.log(`reviewers returned ${first.findings.length} + ${second.findings.length} finding(s)`)
   return [first, second].flatMap((review, i) =>
