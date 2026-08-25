@@ -1,8 +1,8 @@
 /**
  * PROTOTYPE — throwaway. Vocabulary shared by the three workflow-shape
- * prototypes in this directory: agent definitions, schemas, prompts, report
- * rendering, and scripted fakes. Its real purpose is to answer whether the
- * workflows compose through plain imports — nothing here is an API commitment.
+ * prototypes in this directory: agent definitions, schemas, the environment
+ * seam, and scripted fakes. Workflow logic lives in the workflow files, not
+ * here. Nothing is an API commitment.
  */
 
 import { z } from "zod"
@@ -30,6 +30,8 @@ export const Finding = z.object({
   line: z.number().int().min(1),
   title: z.string().min(1),
   severity: Severity,
+  /** Which code-review axis the finding belongs to ("standards"|"spec"). */
+  axis: z.enum(["standards", "spec"]),
   explanation: z.string().min(1),
 })
 export type Finding = z.infer<typeof Finding>
@@ -49,42 +51,6 @@ export type Report = readonly CodedFinding[]
 /** The reply contract a structured turn must satisfy, generated from the schema. */
 export const jsonShape = (schema: z.ZodType): string =>
   `Reply with ONLY a JSON object matching exactly:\n${JSON.stringify(z.toJSONSchema(schema))}`
-
-export const reviewPrompt = (scope: string): string =>
-  `Review ${scope}. Read-only: never edit anything.\n${jsonShape(Review)}`
-
-// --- The review workflow's core: used standalone and by the chained prototype.
-
-const SEVERITY_ORDER: readonly Severity[] = ["critical", "high", "medium", "low"]
-
-export function renderReport(report: Report): string {
-  if (report.length === 0) return "No findings."
-  const rank = (finding: CodedFinding): number => SEVERITY_ORDER.indexOf(finding.severity)
-  return [...report]
-    .sort((a, b) => rank(a) - rank(b))
-    .map(
-      (f) => `- [${f.severity}] ${f.id} ${f.path}:${f.line} — ${f.title}\n  ${f.explanation}`,
-    )
-    .join("\n")
-}
-
-/**
- * Two independent read-only reviewers in parallel (different harnesses,
- * different models); findings merge with ids attached. Read-only turns opt
- * into `"transient"` retries — repeating them wholesale is safe.
- */
-export async function collectReviews(scope: string): Promise<Report> {
-  const retryOpts = { retries: "transient" } as const
-  const [first, second] = await Promise.all([
-    reviewer.ask(reviewPrompt(scope), Review, retryOpts),
-    auditor.ask(reviewPrompt(scope), Review, retryOpts),
-  ])
-  console.log(`reviewers returned ${first.findings.length} + ${second.findings.length} finding(s)`)
-  const report = [first, second].flatMap((review, i) =>
-    review.findings.map((finding, j) => ({ ...finding, id: `r${i + 1}.${j + 1}` })),
-  )
-  return report
-}
 
 // --- Environment seam: the deterministic, world-touching steps (gh) sit
 // --- behind an interface so workflows stay pure and fakes stay trivial.
@@ -139,6 +105,7 @@ export function registerFakes(): void {
         line: 3,
         title: "n=0 case unhandled",
         severity: "high",
+        axis: "spec",
         explanation: "fizzbuzz(0) falls through to the default branch and prints nothing.",
       },
     ],

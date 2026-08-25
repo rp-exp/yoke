@@ -14,9 +14,9 @@
  */
 
 import { runWorkflow } from "../../src/workflow.ts"
-import { coder, fakeEnv, registerFakes, renderReport, type Environment } from "./shared.ts"
+import { coder, fakeEnv, registerFakes, type Environment } from "./shared.ts"
 import { implementTicket, keepCiGreen, realEnv } from "./implement-workflow.ts"
-import { codeReview } from "./code-review-workflow.ts"
+import { codeReview, renderReport } from "./code-review-workflow.ts"
 
 const MAX_FIX_ROUNDS = 3
 const BLOCKER_SEVERITIES = new Set(["critical", "high"])

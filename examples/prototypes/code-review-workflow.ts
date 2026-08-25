@@ -5,6 +5,11 @@
  * to test the shape; composes with implement-workflow.ts in
  * implement-and-review-workflow.ts.
  *
+ * The prompt delegates the review procedure to each agent's locally installed
+ * `code-review` skill instead of restating it — the skill evolves outside
+ * this file, and a copied procedure would drift. The prompt adds only the
+ * orchestration contract: read-only, axis tagging, reply schema.
+ *
  * Run against scripted fake agents (no harness needed):
  *   bun examples/prototypes/code-review-workflow.ts --fake
  * Or against real harnesses:
@@ -12,12 +17,48 @@
  */
 
 import { runWorkflow } from "../../src/workflow.ts"
-import { collectReviews, registerFakes, renderReport } from "./shared.ts"
+import { auditor, jsonShape, reviewer, registerFakes, Review, type CodedFinding, type Report, type Severity } from "./shared.ts"
+
+// --- Prompt: procedure lives in the skill; only the contract lives here.
+
+const reviewPrompt = (scope: string): string =>
+  `Review ${scope} by following the \`code-review\` skill (load it via the skill tool if you haven't).\n` +
+  `- Read-only: never edit anything.\n` +
+  `- Report every finding tagged with the code-review axis it belongs to: "standards" or "spec".\n` +
+  jsonShape(Review)
 
 // --- The workflow
 
-export async function codeReview(scope: string): Promise<ReturnType<typeof collectReviews>> {
-  return collectReviews(scope)
+const SEVERITY_ORDER: readonly Severity[] = ["critical", "high", "medium", "low"]
+
+export function renderReport(report: Report): string {
+  if (report.length === 0) return "No findings."
+  const rank = (finding: CodedFinding): number => SEVERITY_ORDER.indexOf(finding.severity)
+  return [...report]
+    .sort((a, b) => rank(a) - rank(b))
+    .map(
+      (f) =>
+        `- [${f.severity}] ${f.id} (${f.axis}) ${f.path}:${f.line} — ${f.title}\n  ${f.explanation}`,
+    )
+    .join("\n")
+}
+
+/**
+ * Two reviewers in parallel — the barrier is fine, both are read-only turns,
+ * which is also why they opt into `"transient"` retries. Findings merge with
+ * ids attached; duplicates are left for the workflow's consumer to account
+ * for (dedupe across reviewers is domain logic, not layer machinery).
+ */
+export async function codeReview(scope: string): Promise<Report> {
+  const retryOpts = { retries: "transient" } as const
+  const [first, second] = await Promise.all([
+    reviewer.ask(reviewPrompt(scope), Review, retryOpts),
+    auditor.ask(reviewPrompt(scope), Review, retryOpts),
+  ])
+  console.log(`reviewers returned ${first.findings.length} + ${second.findings.length} finding(s)`)
+  return [first, second].flatMap((review, i) =>
+    review.findings.map((finding, j) => ({ ...finding, id: `r${i + 1}.${j + 1}` })),
+  )
 }
 
 // --- Entry point
