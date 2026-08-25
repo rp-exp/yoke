@@ -1,17 +1,24 @@
 /**
  * PROTOTYPE — throwaway. A sketch of what a `yoke/workflow` layer could feel
- * like, just rich enough to run examples/prototypes/implement-workflow.ts.
+ * like, just rich enough to run the examples/prototypes/ workflows.
  * It answers one question: does this shape make workflows easy to read and
  * change? Nothing here is an API commitment; delete freely.
  *
  * Stances taken (each is a design decision to evaluate, not a given):
  * - A workflow is a plain async function. No DSL, no step graph, no builder.
- * - One persistent session per agent for the duration of runWorkflow;
- *   isolation across agents instead of shared context.
+ * - Context is a VALUE: `agent.open()` returns a conversation with its own
+ *   continuing session. Sharing context = passing the value around; fresh
+ *   context = opening again. Nothing is cached behind the scenes, so where
+ *   context is reused is visible at the call site and in signatures.
+ * - A conversation survives failed turns, but its underlying session does
+ *   not: after any aborted/failed turn the next turn continues on a FRESH
+ *   session. Context resets are therefore always loud (logged on retries),
+ *   never silent — and workflow prompts restate what they need.
  * - Fail fast by default: the timeout is always on and only reply-shape
- *   errors are auto-retried (the model just needs to reformat). Repeating a
- *   turn wholesale (`retries: "transient"`) is an explicit opt-in, because
- *   only the workflow knows a repeat is safe.
+ *   errors are auto-retried (the model just needs to reformat; same
+ *   session, same context). Repeating a turn wholesale
+ *   (`retries: "transient"`) is an explicit opt-in, because only the
+ *   workflow knows a repeat is safe.
  * - `ask()` validates via the Standard Schema interface, so schemas are
  *   declarative (zod/valibot/arktype — no dependency on any of them here)
  *   and TS types come from inference. Plain functions stay available for
@@ -36,9 +43,11 @@ export interface TurnOptions {
   /** Turn timeout, always on. Default 15 minutes. */
   readonly timeoutMs?: number
   /**
-   * "shape-only" (default): re-ask when the reply fails validation.
-   * "transient": additionally retry harness-level transient failures on a
-   * fresh session — only for turns where repeating is safe (read-only).
+   * "shape-only" (default): re-ask the same session when the reply fails
+   * validation. "transient": additionally retry harness-level transient
+   * failures — on a FRESH session (the old one is dead), so the
+   * conversation's context is reset; only for turns where both repeating
+   * and losing context are safe.
    */
   readonly retries?: "shape-only" | "transient"
   readonly onRetry?: (message: string) => void
@@ -84,37 +93,41 @@ function toValidatorFn<T>(validator: Validator<T> | ((value: unknown) => T)): (v
   }
 }
 
-export interface Agent {
-  readonly id: string
-  readonly spec: AgentSpec
+/** One continuing context with an agent: open once, turn many times. */
+export interface Conversation {
+  readonly agentId: string
   /** Plain turn; resolves with the final text. */
   run(prompt: string, opts?: TurnOptions): Promise<string>
   /** Structured turn: extract the JSON object, validate it, retry shape errors once. */
   ask<T>(prompt: string, validator: Validator<T> | ((value: unknown) => T), opts?: TurnOptions): Promise<T>
 }
 
-/** Names an agent; nothing is opened until its first turn. */
+export interface Agent {
+  readonly id: string
+  readonly spec: AgentSpec
+  /** Opens a NEW conversation: fresh context, empty history. */
+  open(): Conversation
+}
+
+/** Names an agent; nothing is opened until `open()`. */
 export function agent(id: string, spec: AgentSpec): Agent {
-  return {
-    id,
-    spec,
-    run: (prompt, opts) => turn({ id, spec }, prompt, opts ?? {}, undefined),
-    ask: (prompt, validator, opts) => turn({ id, spec }, prompt, opts ?? {}, toValidatorFn(validator)),
-  }
+  return { id, spec, open: () => newConversation(id, spec) }
 }
 
 /**
- * Runs one workflow body with agent lifecycle handled: every session opened
- * during the body is disposed afterwards, whatever the outcome.
+ * Runs one workflow body with conversation lifecycle handled: every session
+ * opened during the body is disposed afterwards, whatever the outcome.
  */
 export async function runWorkflow<T>(body: () => Promise<T>): Promise<T> {
   try {
     return await body()
   } finally {
-    for (const [id, handle] of sessions) {
-      sessions.delete(id)
-      await handle.dispose().catch(() => {})
+    for (const conversation of live) {
+      if (conversation.handle !== undefined) {
+        await conversation.handle.dispose().catch(() => {})
+      }
     }
+    live.clear()
   }
 }
 
@@ -170,28 +183,48 @@ function isTransient(err: unknown): boolean {
 
 const backoffMs = (attempt: number): number => Math.min(2 * 4 ** attempt, 120) * 1000
 
-const sessions = new Map<string, SessionHandle>()
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
-async function sessionFor(a: { id: string; spec: AgentSpec }): Promise<SessionHandle> {
-  const existing = sessions.get(a.id)
-  if (existing !== undefined) return existing
-  if (fakes.has(a.id)) return fakeHandle(a.id)
-  const harness = await open(a.spec.harness)
+interface InternalConversation {
+  readonly agentId: string
+  readonly spec: AgentSpec
+  handle: SessionHandle | undefined
+}
+
+const live = new Set<InternalConversation>()
+
+function newConversation(agentId: string, spec: AgentSpec): Conversation {
+  const conversation: InternalConversation = { agentId, spec, handle: undefined }
+  live.add(conversation)
+  return {
+    agentId,
+    run: (prompt, opts) => turn(conversation, prompt, opts ?? {}, undefined),
+    ask: (prompt, validator, opts) => turn(conversation, prompt, opts ?? {}, toValidatorFn(validator)),
+  }
+}
+
+async function ensureHandle(conversation: InternalConversation): Promise<SessionHandle> {
+  if (conversation.handle !== undefined) return conversation.handle
+  if (fakes.has(conversation.agentId)) return fakeHandle(conversation.agentId)
+  const harness = await open(conversation.spec.harness)
   const handle = await harness.createSession({
     cwd: process.cwd(),
-    ...(a.spec.model !== undefined ? { model: a.spec.model } : {}),
-    ...(a.spec.effort !== undefined ? { effort: a.spec.effort } : {}),
+    ...(conversation.spec.model !== undefined ? { model: conversation.spec.model } : {}),
+    ...(conversation.spec.effort !== undefined ? { effort: conversation.spec.effort } : {}),
   })
-  sessions.set(a.id, handle)
+  conversation.handle = handle
   return handle
 }
 
-/** Drops a poisoned session so the next turn starts fresh. */
-async function resetSession(id: string): Promise<void> {
-  const handle = sessions.get(id)
-  if (handle === undefined) return
-  sessions.delete(id)
-  await handle.dispose().catch(() => {})
+/**
+ * A failed or aborted turn kills the underlying session; the conversation
+ * continues on a fresh one at its next turn. Context loss is a fact of
+ * harness failures — the layer's job is to make it loud, not to hide it.
+ */
+async function invalidate(conversation: InternalConversation): Promise<void> {
+  const handle = conversation.handle
+  conversation.handle = undefined
+  if (handle !== undefined) await handle.dispose().catch(() => {})
 }
 
 function extractJson(text: string): unknown {
@@ -201,10 +234,8 @@ function extractJson(text: string): unknown {
   return JSON.parse(text.slice(start, end + 1))
 }
 
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
-
 async function turn<T>(
-  a: { readonly id: string; readonly spec: AgentSpec },
+  conversation: InternalConversation,
   initialPrompt: string,
   opts: TurnOptions,
   validate: ((value: unknown) => Promise<T>) | undefined,
@@ -215,7 +246,7 @@ async function turn<T>(
   let prompt = initialPrompt
 
   for (;;) {
-    const handle = await sessionFor(a)
+    const handle = await ensureHandle(conversation)
 
     // Transport path: one shot at getting a complete reply before the timer.
     let reply: string
@@ -236,14 +267,15 @@ async function turn<T>(
       }
     } catch (err) {
       await handle.abort().catch(() => {}) // best effort on timeout races
+      await invalidate(conversation) // the session ate a failed turn — never trusted again
       if (transientLeft === 0 || !isTransient(err)) throw err
       transientLeft -= 1
       const wait = backoffMs(TRANSIENT_ATTEMPTS - 1 - transientLeft)
       ;(opts.onRetry ?? console.error)(
-        `retrying "${a.id}" in ${Math.round(wait / 1000)}s after transient failure: ${String(err)}`,
+        `retrying "${conversation.agentId}" in ${Math.round(wait / 1000)}s on a FRESH session ` +
+          `(context reset) after transient failure: ${String(err)}`,
       )
       await sleep(wait)
-      await resetSession(a.id)
       continue
     }
 
@@ -257,7 +289,7 @@ async function turn<T>(
     } catch (err) {
       if (shapeLeft === 0) throw err
       shapeLeft -= 1
-      ;(opts.onRetry ?? console.error)(`"${a.id}" reply refused, re-asking with the issues: ${String(err)}`)
+      ;(opts.onRetry ?? console.error)(`"${conversation.agentId}" reply refused, re-asking with the issues: ${String(err)}`)
       prompt = `${initialPrompt}\n\nYour previous reply was refused (${String(err)}). Reply again with ONLY corrected JSON.`
     }
   }

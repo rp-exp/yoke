@@ -16,7 +16,7 @@
  */
 
 import { runWorkflow } from "../../src/workflow.ts"
-import { coder, fakeEnv, registerFakes, type Environment } from "./shared.ts"
+import { fakeEnv, registerFakes, type Environment } from "./shared.ts"
 import { implementTicket, keepCiGreen, realEnv } from "./implement-workflow.ts"
 import { codeReview, renderReport } from "./code-review-workflow.ts"
 
@@ -29,7 +29,9 @@ async function ship(
   env: Environment,
   ticketRef: string,
 ): Promise<{ prUrl: string; report: Awaited<ReturnType<typeof codeReview>> }> {
-  const { prUrl } = await implementTicket(env, ticketRef)
+  // `build` is the conversation that implemented the ticket — review fixes
+  // continue it, so the coder remembers what it built and why.
+  const { prUrl, build } = await implementTicket(env, ticketRef)
 
   let report = await codeReview(`PR ${prUrl}`)
   for (let round = 1; report.some((f) => BLOCKER_SEVERITIES.has(f.severity)); round += 1) {
@@ -39,12 +41,13 @@ async function ship(
     console.log(`review round ${round}: fixing ${report.length} blocker(s)`)
     // Mutating fix turn — fail-fast default, no blind retries.
     const lines = report.map((f) => `- ${f.id} [${f.severity}] ${f.path}:${f.line} — ${f.title}`).join("\n")
-    await coder.run(`Fix these review findings:\n${lines}`)
+    await build.run(`Fix these review findings:\n${lines}`)
     report = await codeReview(`PR ${prUrl} after fixes`)
   }
 
-  // Fixes may have touched code — CI must be green again before reporting.
-  await keepCiGreen(env, prUrl)
+  // Fixes may have touched code — CI must be green again before reporting,
+  // in the same build context.
+  await keepCiGreen(env, prUrl, build)
 
   return { prUrl, report }
 }

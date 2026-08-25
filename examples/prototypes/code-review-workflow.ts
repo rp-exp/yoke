@@ -53,16 +53,19 @@ export function renderReport(report: Report): string {
 }
 
 /**
- * Two reviewers in parallel — the barrier is fine, both are read-only turns,
- * which is also why they opt into `"transient"` retries. Findings merge with
- * ids attached; duplicates are left for the workflow's consumer to account
- * for (dedupe across reviewers is domain logic, not layer machinery).
+ * Every call opens FRESH reviewer conversations: a full re-review with no
+ * memory of prior rounds is the only proof a finding was resolved (the
+ * tri-review rule). Two reviewers in parallel — the barrier is fine, both
+ * are read-only turns, which is also why they opt into `"transient"`
+ * retries (safe to repeat, and their context is empty anyway). Findings
+ * merge with ids attached; duplicates are left for the workflow's consumer
+ * to account for (dedupe across reviewers is domain logic, not machinery).
  */
 export async function codeReview(scope: string): Promise<Report> {
   const retryOpts = { retries: "transient" } as const
   const [first, second] = await Promise.all([
-    reviewerClaude.ask(reviewPrompt(scope), Review, retryOpts),
-    reviewerCursor.ask(reviewPrompt(scope), Review, retryOpts),
+    reviewerClaude.open().ask(reviewPrompt(scope), Review, retryOpts),
+    reviewerCursor.open().ask(reviewPrompt(scope), Review, retryOpts),
   ])
   console.log(`reviewers returned ${first.findings.length} + ${second.findings.length} finding(s)`)
   return [first, second].flatMap((review, i) =>

@@ -16,7 +16,7 @@
  *   bun examples/prototypes/implement-workflow.ts "freeform task text"
  */
 
-import { runWorkflow } from "../../src/workflow.ts"
+import { runWorkflow, type Conversation } from "../../src/workflow.ts"
 import { coder, fakeEnv, registerFakes, type Environment } from "./shared.ts"
 
 // --- The real environment: gh is the boundary; failures are loud.
@@ -76,27 +76,32 @@ const MAX_CI_ROUNDS = 5
 export async function implementTicket(
   env: Environment,
   ticketRef: string,
-): Promise<{ ticket: { id: string; title: string }; prUrl: string }> {
+): Promise<{ ticket: { id: string; title: string }; prUrl: string; build: Conversation }> {
   // 1. Read the ticket. No ticket → stop and report.
   const ticket = await env.resolveTicket(ticketRef)
   console.log(`ticket ${ticket.id}: ${ticket.title}`)
 
+  // One conversation for the whole build: implementation and every CI fix
+  // share context — the coder remembers what it built. Returning `build`
+  // lets callers (ship) continue THAT context with review fixes.
+  const build = coder.open()
+
   // 2. Implement, delegating the procedure to the agent's `implement` skill.
-  await coder.run(implementPrompt(ticket))
+  await build.run(implementPrompt(ticket))
 
   // 3. Open a PR when the implementation is ready.
   const prUrl = await env.openPr()
   console.log(`opened ${prUrl}`)
 
   // 4. Keep CI green: diagnose, fix, push again while anything fails.
-  await keepCiGreen(env, prUrl)
+  await keepCiGreen(env, prUrl, build)
 
   // 5. Report the PR URL and final CI result.
-  return { ticket, prUrl }
+  return { ticket, prUrl, build }
 }
 
-/** Reusable: the chained prototype runs it again after review fixes. */
-export async function keepCiGreen(env: Environment, prUrl: string): Promise<void> {
+/** Reusable: ship runs it again after review fixes, in the build context. */
+export async function keepCiGreen(env: Environment, prUrl: string, build: Conversation): Promise<void> {
   for (let round = 1; ; round += 1) {
     const failed = await env.failingChecks(prUrl)
     if (failed.length === 0) return
@@ -105,7 +110,7 @@ export async function keepCiGreen(env: Environment, prUrl: string): Promise<void
     }
     console.log(`CI failing (${failed.join(", ")}); fix round ${round}/${MAX_CI_ROUNDS - 1}`)
     // Mutating turn — fail-fast default, no blind retries.
-    await coder.run(ciFixPrompt(prUrl, failed))
+    await build.run(ciFixPrompt(prUrl, failed))
   }
 }
 
