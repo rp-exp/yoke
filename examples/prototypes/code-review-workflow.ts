@@ -3,7 +3,7 @@
  * reviewers (different harnesses, different models) fan out in parallel and
  * their findings merge. Written against the workflow stub (src/workflow.ts)
  * to test the shape; composes with implement-workflow.ts in
- * implement-and-review-workflow.ts.
+ * ship-workflow.ts.
  *
  * The prompt delegates the review procedure to each agent's locally installed
  * `code-review` skill instead of restating it — the skill evolves outside

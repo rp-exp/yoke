@@ -1,16 +1,18 @@
 /**
- * PROTOTYPE — throwaway. The chained workflow: the `implement` command, then
- * code review, fixing blockers and re-confirming CI until everything is green.
+ * PROTOTYPE — throwaway. The ship workflow: the `implement` command, then
+ * code review, fixing blockers and re-confirming CI until everything is
+ * green. "Ship" because that is the user-facing verb — implement + review +
+ * green CI is one thing from the outside.
  *
  * The point of this file is the composition itself: `implementTicket`,
  * `keepCiGreen`, and `codeReview` are imported unchanged from the two
- * standalone prototypes — chaining is a plain function call, not a framework
- * feature.
+ * standalone prototypes — composition is a plain function call, not a
+ * framework feature.
  *
  * Run against scripted fakes (no harness, no gh):
- *   bun examples/prototypes/implement-and-review-workflow.ts --fake 42
+ *   bun examples/prototypes/ship-workflow.ts --fake 42
  * Or for real:
- *   bun examples/prototypes/implement-and-review-workflow.ts 42
+ *   bun examples/prototypes/ship-workflow.ts 42
  */
 
 import { runWorkflow } from "../../src/workflow.ts"
@@ -23,7 +25,7 @@ const BLOCKER_SEVERITIES = new Set(["critical", "high"])
 
 // --- The workflow
 
-async function implementReviewAndShip(
+async function ship(
   env: Environment,
   ticketRef: string,
 ): Promise<{ prUrl: string; report: Awaited<ReturnType<typeof codeReview>> }> {
@@ -54,13 +56,13 @@ async function main(): Promise<void> {
   const fake = argv.includes("--fake")
   const ticketRef = argv.filter((arg) => arg !== "--fake").join(" ") || (fake ? "42" : "")
   if (ticketRef === "") {
-    throw new Error("usage: bun examples/prototypes/implement-and-review-workflow.ts [--fake] <ticket>")
+    throw new Error("usage: bun examples/prototypes/ship-workflow.ts [--fake] <ticket>")
   }
 
   if (fake) registerFakes()
 
   const env = fake ? fakeEnv : realEnv
-  const { prUrl, report } = await runWorkflow(() => implementReviewAndShip(env, ticketRef))
+  const { prUrl, report } = await runWorkflow(() => ship(env, ticketRef))
   console.log(`\n${prUrl} — all required checks green\n\nFinal review:\n${renderReport(report)}`)
   process.exit(report.some((f) => BLOCKER_SEVERITIES.has(f.severity)) ? 1 : 0)
 }
