@@ -8,7 +8,7 @@ import { agent, runWorkflow, type Agent, type TurnOptions } from "../src/workflo
  * written on the workflow layer (src/workflow.ts). Reviewers and the verifier
  * are `agent()` values; every turn is a `Conversation.ask()`, so the layer
  * owns the timeout, retry, and reply-contract machinery this file used to
- * carry itself. What remains here is purely the tri-review domain: schemas,
+ * carry itself. What remains here is purely the review-rounds domain: schemas,
  * prompts, claim accounting, axis derivation, rounds, and the report.
  *
  * Every reviewer executes the user's battle-tested /code-review procedure by
@@ -23,10 +23,10 @@ import { agent, runWorkflow, type Agent, type TurnOptions } from "../src/workflo
  *
  * Run from any clean checkout of the repo; pass a pull request and the script
  * checks it out detached itself (restoring your previous ref afterwards):
- *   bun examples/tri-review-rounds.ts 42
- *   bun examples/tri-review-rounds.ts owner/repo#42 [--max-rounds N]
+ *   bun examples/review-rounds.ts 42
+ *   bun examples/review-rounds.ts owner/repo#42 [--max-rounds N]
  * Or point it directly at a diff you already have checked out:
- *   bun examples/tri-review-rounds.ts <base-sha> <head-sha>
+ *   bun examples/review-rounds.ts <base-sha> <head-sha>
  */
 
 // ---------------------------------------------------------------------------
@@ -149,7 +149,7 @@ Rules:
 // ---------------------------------------------------------------------------
 // Orchestration
 
-export interface TriReviewDeps {
+export interface ReviewRoundsDeps {
   readonly reviewers: readonly Agent[]
   readonly verifier: Agent
   readonly base: string
@@ -170,7 +170,7 @@ export interface RoundSummary {
   readonly findings: readonly Finding[]
 }
 
-export interface TriReviewResult {
+export interface ReviewRoundsResult {
   readonly status: "clean" | "round-limit" | "accounting-failed"
   readonly rounds: readonly RoundSummary[]
   /** Latest state of every finding ever raised, by stable id. */
@@ -178,7 +178,7 @@ export interface TriReviewResult {
   readonly outstandingFixNow: readonly string[]
 }
 
-export async function runTriReview(deps: TriReviewDeps): Promise<TriReviewResult> {
+export async function runReviewRounds(deps: ReviewRoundsDeps): Promise<ReviewRoundsResult> {
   // Reviewer and verifier turns are read-only, so repeating one on a fresh
   // session is safe — that idempotency judgment belongs to this workflow,
   // which is why the policy is set on the turns here rather than assumed.
@@ -256,7 +256,7 @@ function bySeverityDesc(a: Finding, b: Finding): number {
  * never merged or reranked across axes, one summary line per axis naming its
  * worst issue.
  */
-export function renderReport(result: TriReviewResult): string {
+export function renderReport(result: ReviewRoundsResult): string {
   const sections: string[] = []
   for (const axis of ["standards", "spec"]) {
     const items = result.findings
@@ -369,8 +369,8 @@ async function main(): Promise<void> {
     ;[base, head] = positional as [string, string]
   } else {
     console.error(
-      "usage: bun examples/tri-review-rounds.ts <pr> [--max-rounds N]\n" +
-        "       bun examples/tri-review-rounds.ts <base-sha> <head-sha>\n" +
+      "usage: bun examples/review-rounds.ts <pr> [--max-rounds N]\n" +
+        "       bun examples/review-rounds.ts <base-sha> <head-sha>\n" +
         '       <pr> is "42", "#42", "owner/repo#42", or a github.com PR URL',
     )
     process.exit(2)
@@ -382,10 +382,10 @@ async function main(): Promise<void> {
   ]
   const verifier = agent("verifying-claude-code", { harness: "claude-code", model: "claude-opus-5", effort: "high" })
 
-  let result: TriReviewResult
+  let result: ReviewRoundsResult
   try {
     result = await runWorkflow(() =>
-      runTriReview({
+      runReviewRounds({
         reviewers,
         verifier,
         base,

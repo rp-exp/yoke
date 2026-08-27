@@ -50,7 +50,8 @@ the signal to grow the layer — not a reason to add a framework preemptively.
 
 - The layer stays a prototype (`src/workflow.ts`, examples under
   `examples/prototypes/`, not publicly exported) until validated by porting
-  tri-review onto it and by a real-harness run of the code-review workflow.
+  review-rounds (né tri-review) onto it and by a real-harness run of the
+  code-review workflow.
 - Known debts, deliberate until then: `replyContract` imports zod, so only zod
   schemas render their exact JSON shape (other vendors get a generic
   instruction); `runWorkflow` tracks sessions in module state, so two

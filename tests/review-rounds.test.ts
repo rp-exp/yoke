@@ -7,8 +7,8 @@ import {
   Findings,
   parsePrRef,
   renderReport,
-  runTriReview,
-} from "../examples/tri-review-rounds.ts"
+  runReviewRounds,
+} from "../examples/review-rounds.ts"
 
 const transientFailure = () =>
   new YokeError("opencode", "turn failed", {
@@ -175,9 +175,9 @@ describe("pr ref parsing", () => {
   })
 })
 
-describe("tri-review orchestration", () => {
+describe("review-rounds orchestration", () => {
   test("clean first round stops immediately", async () => {
-    const result = await runTriReview({
+    const result = await runReviewRounds({
       reviewers: fakeReviewers([[CLAIMS([]), CLAIMS([]), CLAIMS([])]]),
       verifier: fakeVerifier([FINDINGS([])]),
       base: BASE,
@@ -192,7 +192,7 @@ describe("tri-review orchestration", () => {
   })
 
   test("fix-now findings drive more rounds; resolution reaches clean", async () => {
-    const result = await runTriReview({
+    const result = await runReviewRounds({
       reviewers: fakeReviewers([
         [CLAIMS(["r1"]), CLAIMS([]), CLAIMS([])],
         [CLAIMS([]), CLAIMS([]), CLAIMS([])],
@@ -217,7 +217,7 @@ describe("tri-review orchestration", () => {
 
   test("round limit reports outstanding findings instead of looping forever", async () => {
     const roundsSeen: number[] = []
-    const result = await runTriReview({
+    const result = await runReviewRounds({
       reviewers: fakeReviewers([[CLAIMS(["x"]), CLAIMS([]), CLAIMS([])]]),
       verifier: fakeVerifier([FINDINGS([{ id: "F1", sources: ["opencode:x"], disposition: "fix-now" }])]),
       base: BASE,
@@ -238,7 +238,7 @@ describe("tri-review orchestration", () => {
       calls = call
       return call === 1 ? "not json at all" : CLAIMS(["ok"])
     })
-    const result = await runTriReview({
+    const result = await runReviewRounds({
       reviewers: [flaky, ...fakeReviewers([[CLAIMS([]), CLAIMS([]), CLAIMS([])]])],
       // The verifier must account for flaky's repaired claim.
       verifier: fakeVerifier([FINDINGS([{ id: "F1", sources: ["flaky:ok"], disposition: "skip" }])]),
@@ -253,7 +253,7 @@ describe("tri-review orchestration", () => {
   })
 
   test("verifier accounting failure fails loud, never silently drops claims", async () => {
-    const result = await runTriReview({
+    const result = await runReviewRounds({
       reviewers: fakeReviewers([[CLAIMS(["c1"]), CLAIMS([]), CLAIMS([])]]),
       // Verifier invents a claim ref and drops the real one.
       verifier: fakeVerifier([FINDINGS([{ id: "F1", sources: ["opencode:nope"], disposition: "skip" }])]),
@@ -272,7 +272,7 @@ describe("tri-review orchestration", () => {
       prompts += 1
       throw new YokeError("opencode", "turn failed", { raw: { finish: "error" } })
     })
-    const run = runTriReview({
+    const run = runReviewRounds({
       reviewers: [broken, ...fakeReviewers([[CLAIMS([]), CLAIMS([]), CLAIMS([])]])],
       verifier: fakeVerifier([FINDINGS([])]),
       base: BASE,
@@ -295,7 +295,7 @@ describe("tri-review orchestration", () => {
       if (call <= 2) throw transientFailure()
       return CLAIMS(["ok"])
     })
-    const result = await runTriReview({
+    const result = await runReviewRounds({
       reviewers: [flaky, ...fakeReviewers([[CLAIMS([]), CLAIMS([]), CLAIMS([])]])],
       verifier: fakeVerifier([FINDINGS([{ id: "F1", sources: ["flaky-provider:ok"], disposition: "skip" }])]),
       base: BASE,
