@@ -1,9 +1,14 @@
-import type { SessionHandle } from "../src/types.ts"
-import { YokeError } from "../src/errors.ts"
+import { z } from "zod"
+import { agent, runWorkflow, type Agent, type TurnOptions } from "../src/workflow.ts"
 
 /**
  * Example: PR review rounds driven through three harnesses at once
- * (`yoke/opencode`, `yoke/claude-code`, `yoke/cursor`) plus a verifier turn.
+ * (`yoke/opencode`, `yoke/claude-code`, `yoke/cursor`) plus a verifier turn —
+ * written on the workflow layer (src/workflow.ts). Reviewers and the verifier
+ * are `agent()` values; every turn is a `Conversation.ask()`, so the layer
+ * owns the timeout, retry, and reply-contract machinery this file used to
+ * carry itself. What remains here is purely the tri-review domain: schemas,
+ * prompts, claim accounting, axis derivation, rounds, and the report.
  *
  * Every reviewer executes the user's battle-tested /code-review procedure by
  * following their locally installed code-review skill — the prompt delegates
@@ -11,14 +16,9 @@ import { YokeError } from "../src/errors.ts"
  * skill keeps evolving outside this file. The verifier merges claims per
  * axis; the final report keeps the axes apart, like the skill's aggregate.
  *
- * Ported from the Claude Code `pr-review-rounds` workflow to show the yoke
- * shape of the same idea: your script is the orchestrator. Reviewers are
- * read-only by prompt (enforcement differs per harness — see DESIGN.md);
- * fixing is deliberately out of scope here, so the example can be pointed at
- * any diff without mutation risk.
- *
- * The orchestration core below is pure over a minimal agent seam so it is
- * unit-testable without any harness installed; only `main()` touches yoke.
+ * Reviewers are read-only by prompt (enforcement differs per harness — see
+ * DESIGN.md); fixing is deliberately out of scope here, so the example can be
+ * pointed at any diff without mutation risk.
  *
  * Run from any clean checkout of the repo; pass a pull request and the script
  * checks it out detached itself (restoring your previous ref afterwards):
@@ -29,167 +29,137 @@ import { YokeError } from "../src/errors.ts"
  */
 
 // ---------------------------------------------------------------------------
-// Types
+// Schemas — external model output is untrusted data; validated by `ask` at
+// the boundary, and `ask` states each reply contract from the schema itself.
 
-export interface Location {
-  path: string
-  line: number
-}
+const Location = z.object({ path: z.string().min(1), line: z.number().int().min(1) })
 
-export interface Claim {
-  readonly id: string
-  readonly title: string
-  readonly locations: readonly Location[]
-  readonly explanation: string
-  readonly suggestedSeverity: string
-  /** Which code-review axis the claim belongs to ("standards"|"spec"); kept separate end to end. */
-  readonly axis: string
+const Severity = z.enum(["critical", "high", "medium", "low"])
+
+export const Claim = z.object({
+  id: z.string().min(1),
+  title: z.string().min(1),
+  locations: z.array(Location),
+  explanation: z.string().min(1),
+  suggestedSeverity: Severity,
+  /** Which code-review axis the claim belongs to; kept separate end to end. */
+  axis: z.enum(["standards", "spec"]),
   /** True only for documented-standard breaches; baseline smells and spec gaps are judgement calls. */
-  readonly hardViolation?: true
-}
+  hardViolation: z.literal(true).optional(),
+})
+export type Claim = z.infer<typeof Claim>
 
-export interface Finding {
-  readonly id: string
-  readonly title: string
-  readonly locations: readonly Location[]
-  readonly explanation: string
-  readonly sourceClaimReferences: readonly string[]
-  readonly verification: string
+export const Claims = z.object({ claims: z.array(Claim) })
+
+const FindingBase = z.object({
+  id: z.string().min(1),
+  title: z.string().min(1),
+  locations: z.array(Location),
+  explanation: z.string().min(1),
+  sourceClaimReferences: z.array(z.string().min(1)),
+  verification: z.string().min(1),
+  rejectionReason: z.string().optional(),
+  decisionReason: z.string().optional(),
+  kind: z.string().optional(),
+  severity: Severity.optional(),
+  disposition: z.enum(["fix-now", "follow-up", "skip"]).optional(),
+})
+
+export const Findings = z.object({ findings: z.array(FindingBase) })
+
+/** A verifier finding enriched with the axis derived from its sourcing claims. */
+export interface Finding extends z.infer<typeof FindingBase> {
   /** Derived from the sourcing claims, never taken from the verifier. */
   readonly axis?: string | undefined
   readonly hardViolation?: boolean | undefined
-  readonly rejectionReason?: string | undefined
-  readonly decisionReason?: string | undefined
-  readonly kind?: string | undefined
-  readonly severity?: string | undefined
-  readonly disposition?: string | undefined
 }
 
-/** One live agent conversation for a single review round. */
-export interface RoundAgent {
-  prompt(input: string): Promise<string>
-  abort(): Promise<void>
-  /** Releases the underlying session; refs stay resumable if the factory captured them. */
-  dispose(): Promise<void>
+interface Report {
+  readonly reportID: string
+  readonly claims: readonly Claim[]
 }
-
-export interface AgentFactory {
-  /** Stable report identity, e.g. "reviewing-cursor". */
-  readonly id: string
-  /** A fresh session each round: a fresh full review is the only proof that a prior finding is resolved. */
-  fresh(): Promise<RoundAgent>
-}
-
-const SEVERITIES = new Set(["critical", "high", "medium", "low"])
-const DISPOSITIONS = new Set(["fix-now", "follow-up", "skip"])
-const AXES = new Set(["standards", "spec"])
 
 // ---------------------------------------------------------------------------
-// Boundary parsing — external model output is untrusted data; validate hard.
+// Domain logic
 
-export function parseJsonReply(text: string): unknown {
-  const start = text.indexOf("{")
-  const end = text.lastIndexOf("}")
-  if (start === -1 || end <= start) {
-    throw new Error(`reply contains no JSON object: ${text.slice(0, 120).trim()}`)
+function accountingErrors(reports: readonly Report[], findings: readonly Finding[]): string[] {
+  const expected = new Set<string>()
+  for (const report of reports) for (const claim of report.claims) expected.add(`${report.reportID}:${claim.id}`)
+  const seen = new Map<string, number>()
+  for (const finding of findings) {
+    for (const ref of finding.sourceClaimReferences) seen.set(ref, (seen.get(ref) ?? 0) + 1)
   }
-  return JSON.parse(text.slice(start, end + 1))
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error("expected a JSON object")
+  const errors: string[] = []
+  for (const ref of expected) if (!seen.has(ref)) errors.push(`claim ${ref} is not assigned to any finding`)
+  for (const [ref, count] of seen) {
+    if (!expected.has(ref)) errors.push(`unknown claim reference ${ref}`)
+    else if (count > 1) errors.push(`claim ${ref} is assigned ${count} times`)
   }
-  return value as Record<string, unknown>
+  return errors
 }
 
-function asArray(value: unknown): readonly unknown[] {
-  if (!Array.isArray(value)) throw new Error("expected an array")
-  return value
-}
-
-function str(record: Record<string, unknown>, key: string): string {
-  const value = record[key]
-  if (typeof value !== "string" || value.length === 0) throw new Error(`missing string field "${key}"`)
-  return value
-}
-
-function locations(value: unknown): Location[] {
-  return asArray(value).map((entry) => {
-    const record = asRecord(entry)
-    const line = record.line
-    if (typeof record.path !== "string" || typeof line !== "number" || !Number.isInteger(line) || line < 1) {
-      throw new Error("location needs path:string and integer line>=1")
+/**
+ * Findings inherit their axis from the claims they source — never from the
+ * verifier's say-so. Axis of the first source wins; hardViolation is
+ * contagious (a smell merged into a documented-standard breach stays hard).
+ */
+export function assignAxes(reports: readonly Report[], findings: readonly Finding[]): Finding[] {
+  const byRef = new Map<string, Claim>()
+  for (const report of reports)
+    for (const claim of report.claims) {
+      byRef.set(`${report.reportID}:${claim.id}`, claim)
     }
-    return { path: record.path, line }
-  })
-}
-
-export function validateClaims(value: unknown): Claim[] {
-  const claims = asArray(asRecord(value).claims)
-  return claims.map((entry) => {
-    const record = asRecord(entry)
-    const severity = record.suggestedSeverity
-    if (typeof severity !== "string" || !SEVERITIES.has(severity)) {
-      throw new Error('claim needs suggestedSeverity critical|high|medium|low')
-    }
-    const axis = record.axis
-    if (typeof axis !== "string" || !AXES.has(axis)) {
-      throw new Error('claim needs axis "standards"|"spec"')
-    }
+  return findings.map((finding) => {
+    const sources = finding.sourceClaimReferences
+      .map((ref) => byRef.get(ref))
+      .filter((claim) => claim !== undefined)
     return {
-      id: str(record, "id"),
-      title: str(record, "title"),
-      locations: locations(record.locations),
-      explanation: str(record, "explanation"),
-      suggestedSeverity: severity,
-      axis,
-      ...(record.hardViolation === true ? { hardViolation: true } : {}),
-    }
-  })
-}
-
-export function validateFindings(value: unknown): Finding[] {
-  const findings = asArray(asRecord(value).findings)
-  return findings.map((entry) => {
-    const record = asRecord(entry)
-    const sources: string[] = []
-    for (const ref of asArray(record.sourceClaimReferences)) {
-      if (typeof ref !== "string") throw new Error("sourceClaimReferences must be strings")
-      sources.push(ref)
-    }
-    return {
-      id: str(record, "id"),
-      title: str(record, "title"),
-      locations: locations(record.locations),
-      explanation: str(record, "explanation"),
-      sourceClaimReferences: sources,
-      verification: str(record, "verification"),
-      rejectionReason: typeof record.rejectionReason === "string" ? record.rejectionReason : undefined,
-      decisionReason: typeof record.decisionReason === "string" ? record.decisionReason : undefined,
-      kind: typeof record.kind === "string" ? record.kind : undefined,
-      severity: typeof record.severity === "string" && SEVERITIES.has(record.severity) ? record.severity : undefined,
-      disposition:
-        typeof record.disposition === "string" && DISPOSITIONS.has(record.disposition) ? record.disposition : undefined,
+      ...finding,
+      axis: sources[0]?.axis,
+      hardViolation: sources.some((claim) => claim.hardViolation === true) ? true : undefined,
     }
   })
 }
 
 // ---------------------------------------------------------------------------
-// Orchestration core
+// Prompts — each delegates procedure to the agent's installed skill and adds
+// only the orchestration contract; the reply schema is stated by `ask`.
+
+export const reviewPrompt = (base: string, head: string): string =>
+  `Review the change at ${head} since fixed point ${base} by following the \`code-review\` skill (load it via the skill tool if you haven't).
+- Diff: git diff ${base}...${head}. Commits: git log ${base}..${head} --oneline. Both are pre-validated; an empty diff means an empty claims array.
+- You are strictly read-only: never edit, create, stage, commit, or delete anything.
+- Report every finding as a claim (id: a short stable slug) tagged with the code-review axis it belongs to: "standards" or "spec". Set "hardViolation":true only where the skill treats something as a documented-standard breach, not for judgement-call smells.`
+
+const verifierPrompt = (round: number, reports: readonly Report[], priorFindings: readonly Finding[]): string =>
+  `You are the findings verifier for round ${round} of a multi-round code review. Work read-only; re-read the actual code before deciding.
+Anonymous review reports (do not guess which tool produced which):
+${JSON.stringify(reports)}
+
+Findings from earlier rounds (stable ids; same underlying issue keeps its id):
+${JSON.stringify(priorFindings)}
+
+Rules:
+- Merge duplicate claims into one finding; assign EVERY claim of EVERY report exactly once via sourceClaimReferences of the form "<report-id>:<claim-id>". You may add your own findings with an empty array.
+- Never merge claims from different axes into one finding.
+- verification "false-positive" requires rejectionReason and omits disposition. Otherwise give decisionReason, kind ("merge-blocker"|"improvement"), severity, disposition ("fix-now"|"follow-up"|"skip").
+- An earlier finding no report mentions is resolved: do not restate it.`
+
+// ---------------------------------------------------------------------------
+// Orchestration
 
 export interface TriReviewDeps {
-  readonly reviewers: readonly AgentFactory[]
-  readonly verifier: AgentFactory
+  readonly reviewers: readonly Agent[]
+  readonly verifier: Agent
   readonly base: string
   readonly head: string
   readonly maxRounds: number
   readonly timeoutMs: number
   /** Called after each round for live progress reporting. */
   onRound?: (summary: RoundSummary) => void
-  /** Called when a transient harness failure triggers a fresh-session retry. Defaults to console.error. */
+  /** Forwarded to every turn; defaults to console.error. */
   onRetry?: (message: string) => void
-  /** Backoff between transient retries, ms, by attempt number. Defaults to retryBackoffMs. */
+  /** Forwarded to every turn; injectable so tests never sleep. */
   backoffMs?: (attempt: number) => number
 }
 
@@ -207,242 +177,46 @@ export interface TriReviewResult {
   readonly outstandingFixNow: readonly string[]
 }
 
-/**
- * A turn that outlived its timeout was aborted mid-flight. Classified as
- * transient (see isTransientTurnFailure): overload-shaped, and the abort
- * makes a fresh-session repeat safe for read-only turns.
- */
-export class TurnTimeoutError extends Error {
-  constructor(timeoutMs: number) {
-    super(`turn timed out after ${timeoutMs}ms`)
-    this.name = "TurnTimeoutError"
-  }
-}
-
-async function askValidated<T>(
-  agent: RoundAgent,
-  prompt: string,
-  validate: (value: unknown) => T,
-  timeoutMs: number,
-): Promise<T> {
-  let lastError: unknown
-  // One retry — but only for reply-shape problems. A harness-level failure
-  // (YokeError: turn failed, aborted, ...) will not improve by asking the
-  // model for "corrected JSON"; rethrow it immediately with everything the
-  // error carries, so provider causes stay visible instead of being
-  // mislabelled as the model failing to follow the format.
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const promptForAttempt = attempt === 1 ? prompt : `${prompt}\n\nYour previous reply was refused (${String(lastError)}). Reply again with ONLY corrected JSON.`
-    try {
-      const reply = await Promise.race([
-        agent.prompt(promptForAttempt),
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new TurnTimeoutError(timeoutMs)), timeoutMs)
-        }),
-      ])
-      return validate(parseJsonReply(reply))
-    } catch (err) {
-      lastError = err
-      await agent.abort().catch(() => {}) // best effort on timeout races; gate classifies
-      if (err instanceof TurnTimeoutError) throw err
-      if (err instanceof YokeError) throw err
-    } finally {
-      clearTimeout(timer)
-    }
-  }
-  throw new Error(`agent failed to submit valid JSON twice: ${String(lastError)}`)
-}
-
-function accountingErrors(
-  reports: readonly { reportID: string; claims: readonly Claim[] }[],
-  findings: readonly Finding[],
-): string[] {
-  const expected = new Set<string>()
-  for (const report of reports) for (const claim of report.claims) expected.add(`${report.reportID}:${claim.id}`)
-  const seen = new Map<string, number>()
-  for (const finding of findings) {
-    for (const ref of finding.sourceClaimReferences) seen.set(ref, (seen.get(ref) ?? 0) + 1)
-  }
-  const errors: string[] = []
-  for (const ref of expected) if (!seen.has(ref)) errors.push(`claim ${ref} is not assigned to any finding`)
-  for (const [ref, count] of seen) {
-    if (!expected.has(ref)) errors.push(`unknown claim reference ${ref}`)
-    else if (count > 1) errors.push(`claim ${ref} is assigned ${count} times`)
-  }
-  return errors
-}
-
-// The reviewer prompt mirrors the user's battle-tested /code-review opencode
-// command: it delegates the procedure to each agent's locally installed
-// code-review skill instead of copying the skill into the prompt — the skill
-// evolves outside this file. Only the orchestration contract (read-only,
-// fixed point, JSON claim schema with axes) is added here.
-
-/**
- * Findings inherit their axis from the claims they source — never from the
- * verifier's say-so. Axis of the first source wins; hardViolation is
- * contagious (a smell merged into a documented-standard breach stays hard).
- */
-export function assignAxes(
-  reports: readonly { reportID: string; claims: readonly Claim[] }[],
-  findings: readonly Finding[],
-): Finding[] {
-  const byRef = new Map<string, Claim>()
-  for (const report of reports) for (const claim of report.claims) {
-    byRef.set(`${report.reportID}:${claim.id}`, claim)
-  }
-  return findings.map((finding) => {
-    const sources = finding.sourceClaimReferences
-      .map((ref) => byRef.get(ref))
-      .filter((claim) => claim !== undefined)
-    return {
-      ...finding,
-      axis: sources[0]?.axis,
-      hardViolation: sources.some((claim) => claim.hardViolation === true) ? true : undefined,
-    }
-  })
-}
-
-export const reviewPrompt = (base: string, head: string): string =>
-  `Review the change at ${head} since fixed point ${base} by following the \`code-review\` skill (load it via the skill tool if you haven't).
-- Diff: git diff ${base}...${head}. Commits: git log ${base}..${head} --oneline. Both are pre-validated; an empty diff means an empty claims array.
-- You are strictly read-only: never edit, create, stage, commit, or delete anything.
-- Report every finding as a claim tagged with the code-review axis it belongs to: "standards" or "spec". Set "hardViolation":true only where the skill treats something as a documented-standard breach, not for judgement-call smells.
-Reply with ONLY a JSON object, no prose:
-{"claims":[{"id":"slug","title":"...","locations":[{"path":"src/x.ts","line":10}],"explanation":"why this is wrong","suggestedSeverity":"critical|high|medium|low","axis":"standards|spec","hardViolation":true}]}`
-
-const verifierPrompt = (round: number, reports: unknown, priorFindings: readonly Finding[]): string =>
-  `You are the findings verifier for round ${round} of a multi-round code review. Work read-only; re-read the actual code before deciding.
-Anonymous review reports (do not guess which tool produced which):
-${JSON.stringify(reports)}
-
-Findings from earlier rounds (stable ids; same underlying issue keeps its id):
-${JSON.stringify(priorFindings)}
-
-Rules:
-- Merge duplicate claims into one finding; assign EVERY claim of EVERY report exactly once via sourceClaimReferences of the form "<report-id>:<claim-id>". You may add your own findings with an empty array.
-- Never merge claims from different axes into one finding.
-- verification "false-positive" requires rejectionReason and omits disposition. Otherwise give decisionReason, kind ("merge-blocker"|"improvement"), severity, disposition ("fix-now"|"follow-up"|"skip").
-- An earlier finding no report mentions is resolved: do not restate it.
-Reply with ONLY:
-{"findings":[{...}]}`
-
-/**
- * Retry policy for harness-level turn failures, informed by real provider
- * errors seen in production runs:
- *
- * - transient (up to 5 attempts total on FRESH sessions, exponential
- *   backoff): provider streams dying mid-turn ("invalid-output",
- *   overloaded models), network hiccups, and turns that outlived their
- *   timeout and were aborted mid-flight (TurnTimeoutError).
- *   Reviewer turns here are read-only, so repeating them is safe — that
- *   idempotency judgment is why the policy lives in this workflow, not yoke.
- * - permanent (fail immediately): policy blocks, auth, bad requests —
- *   retrying cannot succeed and would only burn money.
- */
-const TRANSIENT_PATTERNS = [
-  /provider\.invalid-output/,
-  /unknown finish reason/i,
-  /overloaded/i,
-  /rate.?limit/i,
-  /ECONNRESET|ECONNREFUSED|ETIMEDOUT|fetch failed|network/i,
-]
-
-export function isTransientTurnFailure(err: unknown): boolean {
-  if (err instanceof TurnTimeoutError) return true
-  if (!(err instanceof YokeError)) return false
-  const haystack = `${err.message} ${JSON.stringify(err.raw ?? {})}`
-  return TRANSIENT_PATTERNS.some((pattern) => pattern.test(haystack))
-}
-
-/** Backoff before retry attempt n (1-based): 2s, 8s, 32s, 2min — capped. */
-export function retryBackoffMs(attempt: number): number {
-  return Math.min(2 * 4 ** (attempt - 1), 120) * 1000
-}
-
-/**
- * One reviewer/verifier turn with the workflow's retry policy: transient
- * harness failures retry on a FRESH session — up to 5 attempts total with
- * exponential backoff (a session that just ate a failed turn is not
- * trusted); permanent failures rethrow immediately; reply-shape errors
- * retry against the SAME session (model just needs to reformat). Sessions
- * are created here and always disposed. All of it loud.
- */
-const MAX_ATTEMPTS = 5
-
-async function askWithPolicy<T>(
-  factory: AgentFactory,
-  buildPrompt: () => string,
-  validate: (value: unknown) => T,
-  timeoutMs: number,
-  log: (message: string) => void,
-  backoffMs: (attempt: number) => number,
-): Promise<T> {
-  const attemptOn = async (agent: RoundAgent): Promise<T> => {
-    try {
-      return await askValidated(agent, buildPrompt(), validate, timeoutMs)
-    } finally {
-      await agent.dispose().then(() => {}, () => {})
-    }
-  }
-
-  for (let attempt = 1; ; attempt++) {
-    const agent = await factory.fresh()
-    try {
-      return await attemptOn(agent)
-    } catch (err) {
-      if (!isTransientTurnFailure(err) || attempt >= MAX_ATTEMPTS) throw err
-      const waitMs = backoffMs(attempt)
-      log(
-        `retrying ${factory.id} (attempt ${attempt + 1}/${MAX_ATTEMPTS}) in ${Math.round(waitMs / 1000)}s ` +
-          `after transient harness failure: ${String(err)}`,
-      )
-      await new Promise((resolve) => setTimeout(resolve, waitMs))
-    }
-  }
-}
-
 export async function runTriReview(deps: TriReviewDeps): Promise<TriReviewResult> {
+  // Reviewer and verifier turns are read-only, so repeating one on a fresh
+  // session is safe — that idempotency judgment belongs to this workflow,
+  // which is why the policy is set on the turns here rather than assumed.
+  const turnOpts: TurnOptions = {
+    timeoutMs: deps.timeoutMs,
+    retries: "transient",
+    ...(deps.onRetry !== undefined ? { onRetry: deps.onRetry } : {}),
+    ...(deps.backoffMs !== undefined ? { backoffMs: deps.backoffMs } : {}),
+  }
+
   const rounds: RoundSummary[] = []
   let priorFindings: Finding[] = []
 
   for (let round = 1; round <= deps.maxRounds; round++) {
-    // Barrier is deliberate: the verifier needs every report at once.
-    const reports = await Promise.all(
-      deps.reviewers.map(async (factory) => {
-        const claims = await askWithPolicy(
-          factory,
-          () => reviewPrompt(deps.base, deps.head),
-          validateClaims,
-          deps.timeoutMs,
-          deps.onRetry ?? console.error,
-          deps.backoffMs ?? retryBackoffMs,
-        )
-        return { reportID: factory.id, claims }
-      }),
+    // Fresh conversations every round: a fresh full review is the only proof
+    // a prior finding is resolved. The barrier is deliberate: the verifier
+    // needs every report at once.
+    const reports: Report[] = await Promise.all(
+      deps.reviewers.map(async (reviewer) => ({
+        reportID: reviewer.id,
+        claims: (await reviewer.open().ask(reviewPrompt(deps.base, deps.head), Claims, turnOpts)).claims,
+      })),
     )
 
-    const verifier = deps.verifier
-    // askWithPolicy owns session creation and disposal.
-    const findings = await askWithPolicy(
-      verifier,
-      () => verifierPrompt(round, reports, priorFindings),
-      validateFindings,
-      deps.timeoutMs,
-      deps.onRetry ?? console.error,
-      deps.backoffMs ?? retryBackoffMs,
-    )
+    const raw = await deps.verifier.open().ask(verifierPrompt(round, reports, priorFindings), Findings, turnOpts)
 
-    const errors = accountingErrors(reports, findings)
+    const errors = accountingErrors(reports, raw.findings)
     if (errors.length > 0) {
-      return { status: "accounting-failed", rounds, findings, outstandingFixNow: [] }
+      return { status: "accounting-failed", rounds, findings: raw.findings, outstandingFixNow: [] }
     }
-    const withAxes = assignAxes(reports, findings)
+    const withAxes = assignAxes(reports, raw.findings)
 
     const verified = withAxes.filter((finding) => finding.verification === "verified")
     priorFindings = verified
-    const summary: RoundSummary = { round, claims: reports.reduce((n, r) => n + r.claims.length, 0), findings: withAxes }
+    const summary: RoundSummary = {
+      round,
+      claims: reports.reduce((n, r) => n + r.claims.length, 0),
+      findings: withAxes,
+    }
     rounds.push(summary)
     deps.onRound?.(summary)
 
@@ -580,8 +354,8 @@ async function main(): Promise<void> {
     }
   }
 
+  // Adapters self-register on import; agent() then resolves them by id.
   await Promise.all([import("yoke/opencode"), import("yoke/claude-code"), import("yoke/cursor")])
-  const { open } = await import("yoke")
 
   let prepared: PreparedPr | undefined
   let base: string
@@ -600,51 +374,32 @@ async function main(): Promise<void> {
     )
     process.exit(2)
   }
-  const cwd = process.cwd()
 
-  const factories: AgentFactory[] = [
-    {
-      id: "reviewing-opencode",
-      fresh: async () =>
-        handleToRoundAgent(
-          await (await open("opencode")).createSession({ cwd, model: "opencode-go/ox-alpha-free", effort: "high" }),
-        ),
-    },
-    {
-      id: "reviewing-cursor",
-      fresh: async () =>
-        handleToRoundAgent(
-          await (await open("cursor")).createSession({ cwd, model: "grok-4.6", effort: "high" }),
-        ),
-    },
-    {
-      id: "reviewing-claude-code",
-      fresh: async () =>
-        handleToRoundAgent(await (await open("claude-code")).createSession({ cwd, model: "opus", effort: "high" })),
-    },
+  const reviewers = [
+    agent("reviewing-opencode", { harness: "opencode", model: "opencode-go/ox-alpha-free", effort: "high" }),
+    agent("reviewing-cursor", { harness: "cursor", model: "grok-4.6", effort: "high" }),
+    agent("reviewing-claude-code", { harness: "claude-code", model: "opus", effort: "high" }),
   ]
+  // The verifier runs on the opencode harness default — whatever
+  // provider/model/effort the service currently resolves, no pinning.
+  const verifier = agent("verifying-opencode", { harness: "opencode" })
 
-  // Everything else (the verifier) runs on the opencode harness default —
-  // whatever provider/model/effort the service currently resolves, no pinning.
-  const verifierFactory: AgentFactory = {
-    id: "verifying-opencode",
-    fresh: async () => handleToRoundAgent(await (await open("opencode")).createSession({ cwd })),
-  }
-
-  let result: Awaited<ReturnType<typeof runTriReview>>
+  let result: TriReviewResult
   try {
-    result = await runTriReview({
-      reviewers: factories,
-      verifier: verifierFactory,
-      base,
-      head,
-      maxRounds,
-      timeoutMs: 15 * 60_000,
-      onRound: ({ round, claims, findings }) => {
-        const fixNow = findings.filter((f) => f.disposition === "fix-now").length
-        console.log(`round ${round}: ${claims} claims, ${findings.length} findings (${fixNow} fix-now)`)
-      },
-    })
+    result = await runWorkflow(() =>
+      runTriReview({
+        reviewers,
+        verifier,
+        base,
+        head,
+        maxRounds,
+        timeoutMs: 15 * 60_000,
+        onRound: ({ round, claims, findings }) => {
+          const fixNow = findings.filter((f) => f.disposition === "fix-now").length
+          console.log(`round ${round}: ${claims} claims, ${findings.length} findings (${fixNow} fix-now)`)
+        },
+      }),
+    )
   } finally {
     // The review is read-only, so whatever gh checked out can always go back.
     if (prepared !== undefined) sh(["git", "checkout", prepared.previousRef])
@@ -658,14 +413,6 @@ async function main(): Promise<void> {
     console.error("\naccounting failed: the verifier mis-assigned claims — see result JSON in the transcript")
   }
   process.exit(result.status === "clean" ? 0 : 1)
-}
-
-function handleToRoundAgent(handle: SessionHandle): RoundAgent & { dispose(): Promise<void> } {
-  return {
-    prompt: async (input) => (await handle.prompt(input)).text,
-    abort: () => handle.abort(),
-    dispose: () => handle.dispose(),
-  }
 }
 
 if (import.meta.main) {
