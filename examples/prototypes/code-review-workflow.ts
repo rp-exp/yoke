@@ -1,5 +1,5 @@
 /**
- * PROTOTYPE — throwaway. The code-review workflow: two independent read-only
+ * PROTOTYPE — throwaway. The code-review workflow: independent read-only
  * reviewers (different harnesses, different models) fan out in parallel and
  * their findings merge. Written against the workflow stub (src/workflow.ts)
  * to test the shape; composes with implement-workflow.ts in
@@ -8,18 +8,18 @@
  * The prompt delegates the review procedure to each agent's locally installed
  * `code-review` skill instead of restating it — the skill evolves outside
  * this file, and a copied procedure would drift. The prompt adds only the
- * orchestration contract: read-only, axis tagging, reply schema.
+ * orchestration contract (read-only, axis tagging); the reply schema is
+ * stated by `ask` itself.
  *
- * Run against scripted fake agents (no harness needed):
+ * Run against a scripted fake environment (no harness needed):
  *   bun examples/prototypes/code-review-workflow.ts --fake
  * Or against real harnesses:
  *   bun examples/prototypes/code-review-workflow.ts "the uncommitted changes"
  */
 
-import { runWorkflow } from "../../src/workflow.ts"
+import { runWorkflow, type Agent } from "../../src/workflow.ts"
 import {
-  jsonShape,
-  registerFakes,
+  makeFakeEnv,
   Review,
   reviewerClaude,
   reviewerCursor,
@@ -33,8 +33,7 @@ import {
 const reviewPrompt = (scope: string): string =>
   `Review ${scope} by following the \`code-review\` skill (load it via the skill tool if you haven't).\n` +
   `- Read-only: never edit anything.\n` +
-  `- Report every finding tagged with the code-review axis it belongs to: "standards" or "spec".\n` +
-  jsonShape(Review)
+  `- Report every finding tagged with the code-review axis it belongs to: "standards" or "spec".`
 
 // --- The workflow
 
@@ -55,20 +54,16 @@ export function renderReport(report: Report): string {
 /**
  * Every call opens FRESH reviewer conversations: a full re-review with no
  * memory of prior rounds is the only proof a finding was resolved (the
- * tri-review rule). Two reviewers in parallel — the barrier is fine, both
- * are read-only turns, which is also why they opt into `"transient"`
- * retries (safe to repeat, and their context is empty anyway). Findings
- * merge with ids attached; duplicates are left for the workflow's consumer
- * to account for (dedupe across reviewers is domain logic, not machinery).
+ * tri-review rule). Reviewers run in parallel — the barrier is fine, they
+ * are read-only turns (which is also why their specs declare `"transient"`
+ * retries). Findings merge with ids attached; duplicates are left for the
+ * workflow's consumer to account for (dedupe across reviewers is domain
+ * logic, not machinery).
  */
-export async function codeReview(scope: string): Promise<Report> {
-  const retryOpts = { retries: "transient" } as const
-  const [first, second] = await Promise.all([
-    reviewerClaude.open().ask(reviewPrompt(scope), Review, retryOpts),
-    reviewerCursor.open().ask(reviewPrompt(scope), Review, retryOpts),
-  ])
-  console.log(`reviewers returned ${first.findings.length} + ${second.findings.length} finding(s)`)
-  return [first, second].flatMap((review, i) =>
+export async function codeReview(reviewers: readonly Agent[], scope: string): Promise<Report> {
+  const reviews = await Promise.all(reviewers.map((r) => r.open().ask(reviewPrompt(scope), Review)))
+  console.log(`reviewers returned ${reviews.map((r) => r.findings.length).join(" + ")} finding(s)`)
+  return reviews.flatMap((review, i) =>
     review.findings.map((finding, j) => ({ ...finding, id: `r${i + 1}.${j + 1}` })),
   )
 }
@@ -80,9 +75,8 @@ async function main(): Promise<void> {
   const fake = argv.includes("--fake")
   const scope = argv.filter((arg) => arg !== "--fake").join(" ") || "the uncommitted changes in the working tree"
 
-  if (fake) registerFakes()
-
-  const report = await runWorkflow(() => codeReview(scope))
+  const reviewers = fake ? makeFakeEnv().reviewers : [reviewerClaude, reviewerCursor]
+  const report = await runWorkflow(() => codeReview(reviewers, scope))
   console.log(`\n${renderReport(report)}`)
   // A review that found things should say so to the shell.
   process.exit(report.length > 0 ? 1 : 0)

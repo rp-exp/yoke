@@ -9,7 +9,7 @@
  * the agent keeps only the fuzzy step: implementing via its `implement`
  * skill. Same five steps, same outcome, deterministic where possible.
  *
- * Run against scripted fakes (no harness, no gh):
+ * Run against a scripted fake environment (no harness, no gh):
  *   bun examples/prototypes/implement-workflow.ts --fake 42
  * Or for real:
  *   bun examples/prototypes/implement-workflow.ts 42
@@ -17,11 +17,14 @@
  */
 
 import { runWorkflow, type Conversation } from "../../src/workflow.ts"
-import { coder, fakeEnv, registerFakes, type Environment } from "./shared.ts"
+import { coder, makeFakeEnv, reviewerClaude, reviewerCursor, type Environment } from "./shared.ts"
 
-// --- The real environment: gh is the boundary; failures are loud.
+// --- The real environment: real agents; gh is the boundary; failures are loud.
 
 export const realEnv: Environment = {
+  coder,
+  reviewers: [reviewerClaude, reviewerCursor],
+
   async resolveTicket(raw: string) {
     const value = raw.trim()
     const numbered =
@@ -84,7 +87,7 @@ export async function implementTicket(
   // One conversation for the whole build: implementation and every CI fix
   // share context — the coder remembers what it built. Returning `build`
   // lets callers (ship) continue THAT context with review fixes.
-  const build = coder.open()
+  const build = env.coder.open()
 
   // 2. Implement, delegating the procedure to the agent's `implement` skill.
   await build.run(implementPrompt(ticket))
@@ -124,9 +127,7 @@ async function main(): Promise<void> {
     throw new Error("usage: bun examples/prototypes/implement-workflow.ts [--fake] <ticket-number-or-task>")
   }
 
-  if (fake) registerFakes()
-
-  const { prUrl } = await runWorkflow(() => implementTicket(fake ? fakeEnv : realEnv, ticketRef))
+  const { prUrl } = await runWorkflow(() => implementTicket(fake ? makeFakeEnv() : realEnv, ticketRef))
   console.log(`\n${prUrl} — all required checks green`)
 }
 

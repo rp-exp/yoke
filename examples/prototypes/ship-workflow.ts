@@ -9,14 +9,14 @@
  * standalone prototypes — composition is a plain function call, not a
  * framework feature.
  *
- * Run against scripted fakes (no harness, no gh):
+ * Run against a scripted fake environment (no harness, no gh):
  *   bun examples/prototypes/ship-workflow.ts --fake 42
  * Or for real:
  *   bun examples/prototypes/ship-workflow.ts 42
  */
 
 import { runWorkflow } from "../../src/workflow.ts"
-import { fakeEnv, registerFakes, type Environment } from "./shared.ts"
+import { makeFakeEnv, type Environment } from "./shared.ts"
 import { implementTicket, keepCiGreen, realEnv } from "./implement-workflow.ts"
 import { codeReview, renderReport } from "./code-review-workflow.ts"
 
@@ -33,7 +33,7 @@ async function ship(
   // continue it, so the coder remembers what it built and why.
   const { prUrl, build } = await implementTicket(env, ticketRef)
 
-  let report = await codeReview(`PR ${prUrl}`)
+  let report = await codeReview(env.reviewers, `PR ${prUrl}`)
   for (let round = 1; report.some((f) => BLOCKER_SEVERITIES.has(f.severity)); round += 1) {
     if (round >= MAX_FIX_ROUNDS) {
       throw new Error(`still ${report.length} blocker(s) after ${MAX_FIX_ROUNDS - 1} fix rounds`)
@@ -42,7 +42,7 @@ async function ship(
     // Mutating fix turn — fail-fast default, no blind retries.
     const lines = report.map((f) => `- ${f.id} [${f.severity}] ${f.path}:${f.line} — ${f.title}`).join("\n")
     await build.run(`Fix these review findings:\n${lines}`)
-    report = await codeReview(`PR ${prUrl} after fixes`)
+    report = await codeReview(env.reviewers, `PR ${prUrl} after fixes`)
   }
 
   // Fixes may have touched code — CI must be green again before reporting,
@@ -62,9 +62,7 @@ async function main(): Promise<void> {
     throw new Error("usage: bun examples/prototypes/ship-workflow.ts [--fake] <ticket>")
   }
 
-  if (fake) registerFakes()
-
-  const env = fake ? fakeEnv : realEnv
+  const env = fake ? makeFakeEnv() : realEnv
   const { prUrl, report } = await runWorkflow(() => ship(env, ticketRef))
   console.log(`\n${prUrl} — all required checks green\n\nFinal review:\n${renderReport(report)}`)
   process.exit(report.some((f) => BLOCKER_SEVERITIES.has(f.severity)) ? 1 : 0)

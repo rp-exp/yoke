@@ -1,12 +1,12 @@
 /**
  * PROTOTYPE — throwaway. Vocabulary shared by the three workflow-shape
- * prototypes in this directory: agent definitions, schemas, the environment
- * seam, and scripted fakes. Workflow logic lives in the workflow files, not
- * here. Nothing is an API commitment.
+ * prototypes in this directory: agent definitions, schemas, and the
+ * environment seam. Workflow logic lives in the workflow files, not here.
+ * Nothing is an API commitment.
  */
 
 import { z } from "zod"
-import { agent, fakeAgent } from "../../src/workflow.ts"
+import { agent, fakeAgent, type Agent } from "../../src/workflow.ts"
 
 // --- Agents: named once here, reused by every workflow that needs them.
 
@@ -16,11 +16,24 @@ export const coder = agent("building-opencode", {
   effort: "high",
 })
 
-export const reviewerClaude = agent("reviewing-claude-code", { harness: "claude-code", model: "opus", effort: "high" })
+// Reviewers are read-only by role, so repeating a failed turn is safe —
+// declared once in the spec instead of threaded through every call site.
+export const reviewerClaude = agent("reviewing-claude-code", {
+  harness: "claude-code",
+  model: "opus",
+  effort: "high",
+  retries: "transient",
+})
 
-export const reviewerCursor = agent("reviewing-cursor", { harness: "cursor", model: "grok-4.6", effort: "high" })
+export const reviewerCursor = agent("reviewing-cursor", {
+  harness: "cursor",
+  model: "grok-4.6",
+  effort: "high",
+  retries: "transient",
+})
 
-// --- Schemas: declared once; TS types derive from them.
+// --- Schemas: declared once; TS types derive from them. `ask()` states the
+// --- reply contract from the schema itself, so prompts never restate it.
 
 export const Severity = z.enum(["critical", "high", "medium", "low"])
 export type Severity = z.infer<typeof Severity>
@@ -46,14 +59,9 @@ export interface CodedFinding extends Finding {
 
 export type Report = readonly CodedFinding[]
 
-// --- Prompts
-
-/** The reply contract a structured turn must satisfy, generated from the schema. */
-export const jsonShape = (schema: z.ZodType): string =>
-  `Reply with ONLY a JSON object matching exactly:\n${JSON.stringify(z.toJSONSchema(schema))}`
-
-// --- Environment seam: the deterministic, world-touching steps (gh) sit
-// --- behind an interface so workflows stay pure and fakes stay trivial.
+// --- Environment seam: ONE injected object holding everything a workflow
+// --- reaches outward for — the fuzzy actors (agents) and the deterministic
+// --- world-touching steps (gh). `--fake` swaps this single object.
 
 export interface Ticket {
   readonly id: string
@@ -62,6 +70,8 @@ export interface Ticket {
 }
 
 export interface Environment {
+  readonly coder: Agent
+  readonly reviewers: readonly Agent[]
   /** Resolves a ticket reference; throws when it resolves to nothing. */
   resolveTicket(raw: string): Promise<Ticket>
   openPr(): Promise<string>
@@ -71,22 +81,18 @@ export interface Environment {
 
 // --- Scripted fakes so any prototype runs end to end without harnesses or gh.
 
-let ciFixed = false
-let reviewFixed = false
-const malformedTried = new Set<string>()
-
 /**
  * Narrative: the first CI watch fails one check (the coder fixes it and CI
- * goes green); each reviewer's first-ever reply is malformed (the schema
+ * goes green); each reviewer's first-ever reply is malformed (the `ask`
  * repair loop recovers) and reports one high finding until the coder
- * addresses review findings.
+ * addresses review findings. All state lives in this closure — each call is
+ * a fresh fake world, nothing module-level.
  */
-export function registerFakes(): void {
-  ciFixed = false
-  reviewFixed = false
-  malformedTried.clear()
+export function makeFakeEnv(): Environment {
+  let ciFixed = false
+  let reviewFixed = false
 
-  fakeAgent("building-opencode", (prompt) => {
+  const fakeCoder = fakeAgent("building-opencode", (prompt) => {
     if (prompt.includes("Diagnose, fix, and push")) {
       ciFixed = true
       return "Fixed the failing checks and pushed."
@@ -111,28 +117,30 @@ export function registerFakes(): void {
     ],
   })
 
-  const replyFor = (id: string): string => {
-    if (reviewFixed) return '{"findings":[]}'
-    if (!malformedTried.has(id)) {
-      malformedTried.add(id)
-      return '{"findings":[{"path":"src/fizz.ts","line":3,"severity":"high"}]}'
-    }
-    return oneFinding
+  const fakeReviewer = (id: string): Agent => {
+    let malformedTried = false
+    return fakeAgent(id, () => {
+      if (reviewFixed) return '{"findings":[]}'
+      if (!malformedTried) {
+        malformedTried = true
+        return '{"findings":[{"path":"src/fizz.ts","line":3,"severity":"high"}]}'
+      }
+      return oneFinding
+    })
   }
 
-  fakeAgent("reviewing-claude-code", () => replyFor("reviewing-claude-code"))
-  fakeAgent("reviewing-cursor", () => replyFor("reviewing-cursor"))
-}
-
-export const fakeEnv: Environment = {
-  resolveTicket: async (raw) =>
-    /^\d+$/.test(raw.trim())
-      ? {
-          id: `#${raw.trim()}`,
-          title: "Add fizzbuzz CLI",
-          body: "Add a fizzbuzz CLI: `bun fizzbuzz <n>` prints the classic sequence. See parent spec SPEC-12.",
-        }
-      : { id: "inline", title: "Inline task", body: raw },
-  openPr: async () => "https://github.com/rp-exp/yoke/pull/7",
-  failingChecks: async () => (ciFixed ? [] : ["test"]),
+  return {
+    coder: fakeCoder,
+    reviewers: [fakeReviewer("reviewing-claude-code"), fakeReviewer("reviewing-cursor")],
+    resolveTicket: async (raw) =>
+      /^\d+$/.test(raw.trim())
+        ? {
+            id: `#${raw.trim()}`,
+            title: "Add fizzbuzz CLI",
+            body: "Add a fizzbuzz CLI: `bun fizzbuzz <n>` prints the classic sequence. See parent spec SPEC-12.",
+          }
+        : { id: "inline", title: "Inline task", body: raw },
+    openPr: async () => "https://github.com/rp-exp/yoke/pull/7",
+    failingChecks: async () => (ciFixed ? [] : ["test"]),
+  }
 }
