@@ -2,8 +2,9 @@ import { z } from "zod"
 import { agent, runWorkflow, type Agent, type TurnOptions } from "../src/workflow.ts"
 
 /**
- * Example: PR review rounds driven through three harnesses at once
- * (`yoke/opencode`, `yoke/claude-code`, `yoke/cursor`) plus a verifier turn —
+ * Example: PR review rounds driven through three harnesses at once — two
+ * reviewers (`yoke/cursor`, `yoke/claude-code`) plus a `yoke/opencode`
+ * verifier turn —
  * written on the workflow layer (src/workflow.ts). Reviewers and the verifier
  * are `agent()` values; every turn is a `Conversation.ask()`, so the layer
  * owns the timeout, retry, and reply-contract machinery this file used to
@@ -376,7 +377,6 @@ async function main(): Promise<void> {
   }
 
   const reviewers = [
-    agent("reviewing-opencode", { harness: "opencode", model: "opencode-go/ox-alpha-free", effort: "high" }),
     agent("reviewing-cursor", { harness: "cursor", model: "grok-4.6", effort: "high" }),
     agent("reviewing-claude-code", { harness: "claude-code", model: "opus", effort: "high" }),
   ]

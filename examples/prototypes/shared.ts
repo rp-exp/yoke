@@ -12,7 +12,7 @@ import { agent, fakeAgent, type Agent } from "../../src/workflow.ts"
 
 export const coder = agent("building-opencode", {
   harness: "opencode",
-  model: "opencode-go/ox-alpha-free",
+  model: "opencode/claude-opus-5",
   effort: "high",
 })
 
