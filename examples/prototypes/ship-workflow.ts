@@ -1,13 +1,12 @@
 /**
- * PROTOTYPE — throwaway. The ship workflow: the `implement` command, then
- * code review, fixing blockers and re-confirming CI until everything is
- * green. "Ship" because that is the user-facing verb — implement + review +
- * green CI is one thing from the outside.
+ * PROTOTYPE — throwaway. The ship workflow: implement, then review-and-fix
+ * until no blockers, then re-confirm CI. "Ship" because that is the
+ * user-facing verb — implement + review + green CI is one thing from the
+ * outside.
  *
- * The point of this file is the composition itself: `implementTicket`,
- * `keepCiGreen`, and `codeReview` are imported unchanged from the two
- * standalone prototypes — composition is a plain function call, not a
- * framework feature.
+ * The point of this file is the composition itself: ship is three plain
+ * function calls into the two standalone prototypes, sharing one build
+ * conversation — composition is not a framework feature.
  *
  * Run against a scripted fake environment (no harness, no gh):
  *   bun examples/prototypes/ship-workflow.ts --fake 42
@@ -16,37 +15,21 @@
  */
 
 import { runWorkflow } from "../../src/workflow.ts"
-import { makeFakeEnv, type Environment } from "./shared.ts"
+import { makeFakeEnv, type Environment, type Report } from "./shared.ts"
 import { implementTicket, keepCiGreen, realEnv } from "./implement-workflow.ts"
-import { codeReview, renderReport } from "./code-review-workflow.ts"
-
-const MAX_FIX_ROUNDS = 3
-const BLOCKER_SEVERITIES = new Set(["critical", "high"])
+import { renderReport, reviewUntilNoBlockers } from "./code-review-workflow.ts"
 
 // --- The workflow
 
-async function ship(
-  env: Environment,
-  ticketRef: string,
-): Promise<{ prUrl: string; report: Awaited<ReturnType<typeof codeReview>> }> {
-  // `build` is the conversation that implemented the ticket — review fixes
-  // continue it, so the coder remembers what it built and why.
+async function ship(env: Environment, ticketRef: string): Promise<{ prUrl: string; report: Report }> {
   const { prUrl, build } = await implementTicket(env, ticketRef)
 
-  let report = await codeReview(env.reviewers, `PR ${prUrl}`)
-  for (let round = 1; report.some((f) => BLOCKER_SEVERITIES.has(f.severity)); round += 1) {
-    if (round >= MAX_FIX_ROUNDS) {
-      throw new Error(`still ${report.length} blocker(s) after ${MAX_FIX_ROUNDS - 1} fix rounds`)
-    }
-    console.log(`review round ${round}: fixing ${report.length} blocker(s)`)
-    // Mutating fix turn — fail-fast default, no blind retries.
-    const lines = report.map((f) => `- ${f.id} [${f.severity}] ${f.path}:${f.line} — ${f.title}`).join("\n")
-    await build.run(`Fix these review findings:\n${lines}`)
-    report = await codeReview(env.reviewers, `PR ${prUrl} after fixes`)
-  }
+  // Review fixes continue the build conversation — the coder remembers what
+  // it built and why.
+  const report = await reviewUntilNoBlockers(env.reviewers, build, `PR ${prUrl}`)
 
-  // Fixes may have touched code — CI must be green again before reporting,
-  // in the same build context.
+  // Fixes may have touched code — green CI is ship's promise, so ship
+  // re-confirms it, in the same build context.
   await keepCiGreen(env, prUrl, build)
 
   return { prUrl, report }
@@ -64,8 +47,9 @@ async function main(): Promise<void> {
 
   const env = fake ? makeFakeEnv() : realEnv
   const { prUrl, report } = await runWorkflow(() => ship(env, ticketRef))
+  // The loop guarantees no blockers remain; the report may still carry
+  // medium/low findings for the human to weigh.
   console.log(`\n${prUrl} — all required checks green\n\nFinal review:\n${renderReport(report)}`)
-  process.exit(report.some((f) => BLOCKER_SEVERITIES.has(f.severity)) ? 1 : 0)
 }
 
 if (import.meta.main) {

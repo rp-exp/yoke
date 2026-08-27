@@ -1,8 +1,11 @@
 /**
- * PROTOTYPE — throwaway. The code-review workflow: independent read-only
- * reviewers (different harnesses, different models) fan out in parallel and
- * their findings merge. Written against the workflow stub (src/workflow.ts)
- * to test the shape; composes with implement-workflow.ts in
+ * PROTOTYPE — throwaway. The code-review workflows: `codeReview` is one
+ * read-only round — independent reviewers (different harnesses, different
+ * models) fan out in parallel and their findings merge. On top of it,
+ * `reviewUntilNoBlockers` owns the fix loop: review, have a fixer address
+ * the findings, re-review with FRESH reviewers, until no blockers remain.
+ * Mutation never leaks into `codeReview` itself — it belongs to the fixer
+ * conversation the caller passes in. Composes with implement-workflow.ts in
  * ship-workflow.ts.
  *
  * The prompt delegates the review procedure to each agent's locally installed
@@ -17,7 +20,7 @@
  *   bun examples/prototypes/code-review-workflow.ts "the uncommitted changes"
  */
 
-import { runWorkflow, type Agent } from "../../src/workflow.ts"
+import { runWorkflow, type Agent, type Conversation } from "../../src/workflow.ts"
 import {
   makeFakeEnv,
   Review,
@@ -66,6 +69,39 @@ export async function codeReview(reviewers: readonly Agent[], scope: string): Pr
   return reviews.flatMap((review, i) =>
     review.findings.map((finding, j) => ({ ...finding, id: `r${i + 1}.${j + 1}` })),
   )
+}
+
+const MAX_FIX_ROUNDS = 3
+const BLOCKER_SEVERITIES: ReadonlySet<Severity> = new Set(["critical", "high"])
+
+const hasBlockers = (report: Report): boolean => report.some((f) => BLOCKER_SEVERITIES.has(f.severity))
+
+/**
+ * The review-fix loop. Blockers drive another round; every finding (any
+ * severity) goes to the fixer while blockers remain, and the final report
+ * may still carry medium/low findings — resolving those is the caller's
+ * call. The fixer is a Conversation so fixes land with whatever context the
+ * caller chooses — usually the conversation that built the change. CI after
+ * fixes is deliberately NOT re-confirmed here: review knows nothing about
+ * the world (gh); callers that promised green CI re-confirm it themselves.
+ */
+export async function reviewUntilNoBlockers(
+  reviewers: readonly Agent[],
+  fixer: Conversation,
+  scope: string,
+): Promise<Report> {
+  let report = await codeReview(reviewers, scope)
+  for (let round = 1; hasBlockers(report); round += 1) {
+    if (round >= MAX_FIX_ROUNDS) {
+      throw new Error(`still ${report.length} blocker(s) after ${MAX_FIX_ROUNDS - 1} fix rounds`)
+    }
+    console.log(`review round ${round}: fixing ${report.length} finding(s)`)
+    // Mutating fix turn — fail-fast default, no blind retries.
+    const lines = report.map((f) => `- ${f.id} [${f.severity}] ${f.path}:${f.line} — ${f.title}`).join("\n")
+    await fixer.run(`Fix these review findings:\n${lines}`)
+    report = await codeReview(reviewers, `${scope} after fixes`)
+  }
+  return report
 }
 
 // --- Entry point
