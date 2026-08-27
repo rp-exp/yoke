@@ -10,9 +10,9 @@ import { agent, fakeAgent, type Agent } from "../../src/workflow.ts"
 
 // --- Agents: named once here, reused by every workflow that needs them.
 
-export const coder = agent("building-opencode", {
-  harness: "opencode",
-  model: "opencode/claude-opus-5",
+export const coder = agent("building-claude-code", {
+  harness: "claude-code",
+  model: "claude-opus-5",
   effort: "high",
 })
 
@@ -92,7 +92,7 @@ export function makeFakeEnv(): Environment {
   let ciFixed = false
   let reviewFixed = false
 
-  const fakeCoder = fakeAgent("building-opencode", (prompt) => {
+  const fakeCoder = fakeAgent("building-claude-code", (prompt) => {
     if (prompt.includes("Diagnose, fix, and push")) {
       ciFixed = true
       return "Fixed the failing checks and pushed."

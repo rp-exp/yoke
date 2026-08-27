@@ -2,9 +2,9 @@ import { z } from "zod"
 import { agent, runWorkflow, type Agent, type TurnOptions } from "../src/workflow.ts"
 
 /**
- * Example: PR review rounds driven through three harnesses at once — two
- * reviewers (`yoke/cursor`, `yoke/claude-code`) plus a `yoke/opencode`
- * verifier turn —
+ * Example: PR review rounds — two reviewers (`yoke/cursor`,
+ * `yoke/claude-code`) in parallel plus an Opus 5 verifier turn on
+ * `yoke/claude-code` —
  * written on the workflow layer (src/workflow.ts). Reviewers and the verifier
  * are `agent()` values; every turn is a `Conversation.ask()`, so the layer
  * owns the timeout, retry, and reply-contract machinery this file used to
@@ -356,7 +356,7 @@ async function main(): Promise<void> {
   }
 
   // Adapters self-register on import; agent() then resolves them by id.
-  await Promise.all([import("yoke/opencode"), import("yoke/claude-code"), import("yoke/cursor")])
+  await Promise.all([import("yoke/claude-code"), import("yoke/cursor")])
 
   let prepared: PreparedPr | undefined
   let base: string
@@ -380,9 +380,7 @@ async function main(): Promise<void> {
     agent("reviewing-cursor", { harness: "cursor", model: "grok-4.6", effort: "high" }),
     agent("reviewing-claude-code", { harness: "claude-code", model: "opus", effort: "high" }),
   ]
-  // The verifier runs on the opencode harness default — whatever
-  // provider/model/effort the service currently resolves, no pinning.
-  const verifier = agent("verifying-opencode", { harness: "opencode" })
+  const verifier = agent("verifying-claude-code", { harness: "claude-code", model: "claude-opus-5", effort: "high" })
 
   let result: TriReviewResult
   try {
