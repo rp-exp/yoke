@@ -138,6 +138,8 @@ export interface Conversation {
   run(prompt: string, opts?: TurnOptions): Promise<string>
   /** Structured turn: states the reply contract, extracts, validates, repairs. */
   ask<T>(prompt: string, validator: Validator<T> | ((value: unknown) => T), opts?: TurnOptions): Promise<T>
+  /** Releases the underlying session; safe to call twice. Workflows that open per-round conversations dispose each one when its turn finishes. */
+  dispose(): Promise<void>
 }
 
 export interface Agent {
@@ -283,11 +285,18 @@ function newConversation(
 ): Conversation {
   const conversation: InternalConversation = { agentId, retries, connect, handle: undefined }
   live.add(conversation)
+  const dispose = async (): Promise<void> => {
+    const handle = conversation.handle
+    conversation.handle = undefined
+    live.delete(conversation)
+    if (handle !== undefined) await handle.dispose().catch(() => {})
+  }
   return {
     agentId,
     run: (prompt, opts) => turn(conversation, prompt, opts ?? {}, undefined),
     ask: (prompt, validator, opts) =>
       turn(conversation, `${prompt}\n\n${replyContract(validator)}`, opts ?? {}, toValidatorFn(validator)),
+    dispose,
   }
 }
 
