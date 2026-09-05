@@ -6,9 +6,10 @@ status: accepted
 
 Deterministic multi-agent workflows (implement, code-review, ship) need a layer
 above the turn-based core. The layer is vocabulary, not framework: a workflow is
-a plain async TypeScript function, and the layer exports six names — `agent` /
-`Agent`, `Conversation` (with `run` and `ask`), `RetryPolicy` / `TurnOptions`,
-`fakeAgent`, `runWorkflow`. Steps, loops, fan-out, and merging are ordinary
+a plain async TypeScript function, and the layer exports ten names — `agent` /
+`Agent`, `Conversation` (with `run`, `ask`, `dispose`), `RetryPolicy` /
+`TurnOptions`, `fakeAgent`, `runWorkflow`, plus the failure vocabulary
+`TurnTimeoutError`, `isTransientTurnFailure`, `retryBackoffMs`, `extractJson`. Steps, loops, fan-out, and merging are ordinary
 code; if a workflow cannot be written with these plus plain TypeScript, that is
 the signal to grow the layer — not a reason to add a framework preemptively.
 
@@ -50,7 +51,8 @@ the signal to grow the layer — not a reason to add a framework preemptively.
 
 - The layer stays a prototype (`src/workflow.ts`, examples under
   `examples/prototypes/`, not publicly exported) until validated by porting
-  tri-review onto it and by a real-harness run of the code-review workflow.
+  review-rounds (né tri-review) onto it and by a real-harness run of the
+  code-review workflow.
 - Known debts, deliberate until then: `replyContract` imports zod, so only zod
   schemas render their exact JSON shape (other vendors get a generic
   instruction); `runWorkflow` tracks sessions in module state, so two

@@ -57,7 +57,7 @@ export function renderReport(report: Report): string {
 /**
  * Every call opens FRESH reviewer conversations: a full re-review with no
  * memory of prior rounds is the only proof a finding was resolved (the
- * tri-review rule). Reviewers run in parallel — the barrier is fine, they
+ * review-rounds rule). Reviewers run in parallel — the barrier is fine, they
  * are read-only turns (which is also why their specs declare `"transient"`
  * retries). Findings merge with ids attached; duplicates are left for the
  * workflow's consumer to account for (dedupe across reviewers is domain
