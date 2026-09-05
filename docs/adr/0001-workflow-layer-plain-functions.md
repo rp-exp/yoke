@@ -6,9 +6,10 @@ status: accepted
 
 Deterministic multi-agent workflows (implement, code-review, ship) need a layer
 above the turn-based core. The layer is vocabulary, not framework: a workflow is
-a plain async TypeScript function, and the layer exports six names — `agent` /
-`Agent`, `Conversation` (with `run` and `ask`), `RetryPolicy` / `TurnOptions`,
-`fakeAgent`, `runWorkflow`. Steps, loops, fan-out, and merging are ordinary
+a plain async TypeScript function, and the layer exports ten names — `agent` /
+`Agent`, `Conversation` (with `run`, `ask`, `dispose`), `RetryPolicy` /
+`TurnOptions`, `fakeAgent`, `runWorkflow`, plus the failure vocabulary
+`TurnTimeoutError`, `isTransientTurnFailure`, `retryBackoffMs`, `extractJson`. Steps, loops, fan-out, and merging are ordinary
 code; if a workflow cannot be written with these plus plain TypeScript, that is
 the signal to grow the layer — not a reason to add a framework preemptively.
 
