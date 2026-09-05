@@ -138,7 +138,11 @@ export interface Conversation {
   run(prompt: string, opts?: TurnOptions): Promise<string>
   /** Structured turn: states the reply contract, extracts, validates, repairs. */
   ask<T>(prompt: string, validator: Validator<T> | ((value: unknown) => T), opts?: TurnOptions): Promise<T>
-  /** Releases the underlying session; safe to call twice. Workflows that open per-round conversations dispose each one when its turn finishes. */
+  /**
+   * Releases the underlying session and ends the conversation — terminal, do
+   * not reuse afterwards. Safe to call twice. Workflows that open per-round
+   * conversations dispose each one when its turn finishes.
+   */
   dispose(): Promise<void>
 }
 
@@ -173,7 +177,7 @@ export function agent(id: string, spec: AgentSpec): Agent {
 export function fakeAgent(
   id: string,
   reply: (prompt: string, call: number) => string | Promise<string>,
-  opts?: { readonly retries?: RetryPolicy },
+  opts?: { readonly retries?: RetryPolicy; readonly onDispose?: () => void },
 ): Agent {
   let call = 0
   const connect = async (): Promise<SessionHandle> => ({
@@ -185,7 +189,9 @@ export function fakeAgent(
       throw new Error("fake sessions do not serialize")
     },
     abort: async () => {},
-    dispose: async () => {},
+    dispose: async () => {
+      opts?.onDispose?.()
+    },
   })
   return { id, open: () => newConversation(id, opts?.retries, connect) }
 }

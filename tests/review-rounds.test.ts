@@ -300,4 +300,27 @@ describe("review-rounds orchestration", () => {
     expect(result.status).toBe("clean")
     expect(calls).toBe(3) // two transient failures, third session delivers
   })
+
+  test("per-turn sessions are disposed, not retained until workflow end", async () => {
+    let disposes = 0
+    const onDispose = (): void => {
+      disposes += 1
+    }
+    const reviewers: Agent[] = ["r1", "r2", "r3"].map((id) =>
+      fakeAgent(id, () => CLAIMS([]), { onDispose }),
+    )
+    const verifier = fakeAgent("verifier", () => FINDINGS([]), { onDispose })
+    const result = await runReviewRounds({
+      reviewers,
+      verifier,
+      base: BASE,
+      head: HEAD,
+      maxRounds: 1,
+      timeoutMs: 5_000,
+      onRetry: silent,
+    })
+    expect(result.status).toBe("clean")
+    // 3 reviewers + 1 verifier, 1 round — one dispose per turn.
+    expect(disposes).toBe(4)
+  })
 })

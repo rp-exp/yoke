@@ -6,6 +6,7 @@ import {
   fakeAgent,
   isTransientTurnFailure,
   retryBackoffMs,
+  runWorkflow,
   TurnTimeoutError,
 } from "../src/workflow.ts"
 import { permanentFailure, silent, transientFailure } from "./fake-subject.ts"
@@ -181,5 +182,33 @@ describe("timeouts", () => {
     const run = hung.open().run("go", { timeoutMs: 20, retries: "transient", backoffMs: () => 0, onRetry: silent })
     await expect(run).rejects.toThrow(TurnTimeoutError)
     expect(calls).toBe(5)
+  })
+})
+
+describe("conversation lifecycle", () => {
+  test("dispose releases the session once; safe to call twice", async () => {
+    let disposes = 0
+    const a = fakeAgent("x", () => '{"ok":true}', { onDispose: () => { disposes += 1 } })
+    const conv = a.open()
+    await conv.ask("Do.", Reply, { onRetry: silent })
+    expect(disposes).toBe(0)
+    await conv.dispose()
+    expect(disposes).toBe(1)
+    await conv.dispose()
+    expect(disposes).toBe(1)
+  })
+
+  test("runWorkflow sweeps undisposed sessions and skips explicitly disposed ones", async () => {
+    let disposes = 0
+    const a = fakeAgent("x", () => "done", { onDispose: () => { disposes += 1 } })
+    await runWorkflow(async () => {
+      const kept = a.open()
+      await kept.run("go")
+      const dropped = a.open()
+      await dropped.run("go")
+      await dropped.dispose()
+      expect(disposes).toBe(1)
+    })
+    expect(disposes).toBe(2)
   })
 })
