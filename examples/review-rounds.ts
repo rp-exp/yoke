@@ -37,6 +37,12 @@ const Location = z.object({ path: z.string().min(1), line: z.number().int().min(
 
 const Severity = z.enum(["critical", "high", "medium", "low"])
 
+const Axis = z.enum(["standards", "spec"])
+
+const Verification = z.enum(["verified", "false-positive"])
+
+const Kind = z.enum(["merge-blocker", "improvement"])
+
 export const Claim = z.object({
   id: z.string().min(1),
   title: z.string().min(1),
@@ -44,7 +50,7 @@ export const Claim = z.object({
   explanation: z.string().min(1),
   suggestedSeverity: Severity,
   /** Which code-review axis the claim belongs to; kept separate end to end. */
-  axis: z.enum(["standards", "spec"]),
+  axis: Axis,
   /** True only for documented-standard breaches; baseline smells and spec gaps are judgement calls. */
   hardViolation: z.literal(true).optional(),
 })
@@ -58,10 +64,10 @@ const FindingBase = z.object({
   locations: z.array(Location),
   explanation: z.string().min(1),
   sourceClaimReferences: z.array(z.string().min(1)),
-  verification: z.string().min(1),
+  verification: Verification,
   rejectionReason: z.string().optional(),
   decisionReason: z.string().optional(),
-  kind: z.string().optional(),
+  kind: Kind.optional(),
   severity: Severity.optional(),
   disposition: z.enum(["fix-now", "follow-up", "skip"]).optional(),
 })
@@ -71,7 +77,7 @@ export const Findings = z.object({ findings: z.array(FindingBase) })
 /** A verifier finding enriched with the axis derived from its sourcing claims. */
 export interface Finding extends z.infer<typeof FindingBase> {
   /** Derived from the sourcing claims, never taken from the verifier. */
-  readonly axis?: string | undefined
+  readonly axis?: z.infer<typeof Axis> | undefined
   readonly hardViolation?: boolean | undefined
 }
 
@@ -157,11 +163,11 @@ export interface ReviewRoundsDeps {
   readonly maxRounds: number
   readonly timeoutMs: number
   /** Called after each round for live progress reporting. */
-  onRound?: (summary: RoundSummary) => void
+  readonly onRound?: (summary: RoundSummary) => void
   /** Forwarded to every turn; defaults to console.error. */
-  onRetry?: (message: string) => void
+  readonly onRetry?: (message: string) => void
   /** Forwarded to every turn; injectable so tests never sleep. */
-  backoffMs?: (attempt: number) => number
+  readonly backoffMs?: (attempt: number) => number
 }
 
 export interface RoundSummary {
@@ -195,15 +201,27 @@ export async function runReviewRounds(deps: ReviewRoundsDeps): Promise<ReviewRou
   for (let round = 1; round <= deps.maxRounds; round++) {
     // Fresh conversations every round: a fresh full review is the only proof
     // a prior finding is resolved. The barrier is deliberate: the verifier
-    // needs every report at once.
+    // needs every report at once. Each conversation is disposed when its turn
+    // finishes, so at most one round's sessions are live at once.
     const reports: Report[] = await Promise.all(
-      deps.reviewers.map(async (reviewer) => ({
-        reportID: reviewer.id,
-        claims: (await reviewer.open().ask(reviewPrompt(deps.base, deps.head), Claims, turnOpts)).claims,
-      })),
+      deps.reviewers.map(async (reviewer) => {
+        const conversation = reviewer.open()
+        try {
+          const claims = (await conversation.ask(reviewPrompt(deps.base, deps.head), Claims, turnOpts)).claims
+          return { reportID: reviewer.id, claims }
+        } finally {
+          await conversation.dispose()
+        }
+      }),
     )
 
-    const raw = await deps.verifier.open().ask(verifierPrompt(round, reports, priorFindings), Findings, turnOpts)
+    const verifierConversation = deps.verifier.open()
+    let raw: z.infer<typeof Findings>
+    try {
+      raw = await verifierConversation.ask(verifierPrompt(round, reports, priorFindings), Findings, turnOpts)
+    } finally {
+      await verifierConversation.dispose()
+    }
 
     const errors = accountingErrors(reports, raw.findings)
     if (errors.length > 0) {
@@ -244,10 +262,7 @@ function latestAll(rounds: readonly RoundSummary[]): Finding[] {
 const SEVERITY_ORDER = ["critical", "high", "medium", "low"] as const
 
 function bySeverityDesc(a: Finding, b: Finding): number {
-  const rank = (f: Finding) => {
-    const i = SEVERITY_ORDER.indexOf((f.severity ?? "low") as (typeof SEVERITY_ORDER)[number])
-    return i === -1 ? SEVERITY_ORDER.length : i
-  }
+  const rank = (f: Finding): number => SEVERITY_ORDER.indexOf(f.severity ?? "low")
   return rank(a) - rank(b)
 }
 
@@ -323,6 +338,13 @@ interface PreparedPr {
   readonly repoArg: readonly string[]
 }
 
+// `gh` output is external data — validated at the boundary before use.
+const PrView = z.object({
+  url: z.string().min(1),
+  baseRefOid: z.string().min(1),
+  headRefOid: z.string().min(1),
+})
+
 function preparePr(ref: PrRef): PreparedPr {
   const repoArg = ref.repo !== undefined ? ["--repo", ref.repo] : []
   const dirty = sh(["git", "status", "--porcelain"])
@@ -336,7 +358,7 @@ function preparePr(ref: PrRef): PreparedPr {
 
   sh(["gh", "pr", "checkout", ref.number, "--detach", ...repoArg])
   const view = sh(["gh", "pr", "view", ref.number, "--json", "url,baseRefOid,headRefOid", ...repoArg])
-  const info = JSON.parse(view) as { url: string; baseRefOid: string; headRefOid: string }
+  const info = PrView.parse(JSON.parse(view))
   console.log(`reviewing ${info.url} at ${info.headRefOid.slice(0, 10)} (base ${info.baseRefOid.slice(0, 10)})`)
   return { url: info.url, base: info.baseRefOid, head: info.headRefOid, previousRef, repoArg }
 }
@@ -378,7 +400,7 @@ async function main(): Promise<void> {
 
   const reviewers = [
     agent("reviewing-cursor", { harness: "cursor", model: "grok-4.6", effort: "high" }),
-    agent("reviewing-claude-code", { harness: "claude-code", model: "opus", effort: "high" }),
+    agent("reviewing-claude-code", { harness: "claude-code", model: "claude-opus-5", effort: "high" }),
   ]
   const verifier = agent("verifying-claude-code", { harness: "claude-code", model: "claude-opus-5", effort: "high" })
 
