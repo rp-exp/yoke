@@ -9,18 +9,10 @@ import {
   renderReport,
   runReviewRounds,
 } from "../examples/review-rounds.ts"
-
-const transientFailure = () =>
-  new YokeError("opencode", "turn failed", {
-    raw: {
-      error: { type: "provider.invalid-output", message: "The provider response ended with an unknown finish reason." },
-    },
-  })
+import { silent, transientFailure } from "./fake-subject.ts"
 
 const BASE = "aaa111"
 const HEAD = "bbb222"
-
-const silent = () => {}
 
 const CLAIMS = (ids: string[]) =>
   JSON.stringify({

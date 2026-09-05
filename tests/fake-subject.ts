@@ -154,3 +154,24 @@ export function makeFakeSubject(options: FakeSubjectOptions = {}): ConformanceSu
   const subject = options.tier === "B" ? tierB : tierA
   return { ...subject, harness }
 }
+
+// ---------------------------------------------------------------------------
+// Shared workflow-test helpers — one copy so the transient vocabulary cannot
+// drift between suites.
+
+/** No-op retry logger so tests never touch console.error. */
+export const silent = (): void => {}
+
+/** Provider-shaped transient failure: worth repeating on a fresh session. */
+export const transientFailure = (): YokeError =>
+  new YokeError("opencode", "turn failed", {
+    raw: {
+      error: { type: "provider.invalid-output", message: "The provider response ended with an unknown finish reason." },
+    },
+  })
+
+/** Policy-shaped permanent failure: retrying cannot succeed. */
+export const permanentFailure = (): YokeError =>
+  new YokeError("opencode", "turn failed", {
+    raw: { error: { type: "provider.invalid-request", message: "No endpoints available" } },
+  })

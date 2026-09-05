@@ -8,22 +8,9 @@ import {
   retryBackoffMs,
   TurnTimeoutError,
 } from "../src/workflow.ts"
-
-const transientFailure = () =>
-  new YokeError("opencode", "turn failed", {
-    raw: {
-      error: { type: "provider.invalid-output", message: "The provider response ended with an unknown finish reason." },
-    },
-  })
-
-const permanentFailure = () =>
-  new YokeError("opencode", "turn failed", {
-    raw: { error: { type: "provider.invalid-request", message: "No endpoints available" } },
-  })
+import { permanentFailure, silent, transientFailure } from "./fake-subject.ts"
 
 const Reply = z.object({ ok: z.boolean() })
-
-const silent = () => {}
 
 describe("boundary parsing", () => {
   test("extracts bare, fenced, and prose-wrapped JSON", () => {
@@ -93,7 +80,7 @@ describe("ask — the reply contract", () => {
 
   test("persistently malformed reply fails loud after the single repair", async () => {
     const bad = fakeAgent("bad", () => "still not json")
-    expect(bad.open().ask("Answer.", Reply, { onRetry: silent })).rejects.toThrow(/no JSON/)
+    await expect(bad.open().ask("Answer.", Reply, { onRetry: silent })).rejects.toThrow(/no JSON/)
   })
 })
 
